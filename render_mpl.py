@@ -153,11 +153,15 @@ def render(d, png_path):
                                    facecolor=(0xf8 / 255, 0x71 / 255, 0x71 / 255),
                                    edgecolor="none", zorder=3))
         sx = tx0 + 0.03 * cwdt
-        ax.text(sx, ty1 - (cy + 0.5) * chgt, f"{s:g}", color=fg,
-                fontsize=9, weight=700, va="center", ha="left")
         if tag:
-            ax.text(sx + 0.035, ty1 - (cy + 0.5) * chgt, tag[0], color=tag[1],
+            # wall rows: strike number on top, tag below it - no overlap
+            ax.text(sx, ty1 - (cy + 0.34) * chgt, f"{s:g}", color=fg,
+                    fontsize=9, weight=700, va="center", ha="left")
+            ax.text(sx, ty1 - (cy + 0.70) * chgt, tag[0], color=tag[1],
                     fontsize=6.5, weight=800, va="center", ha="left")
+        else:
+            ax.text(sx, ty1 - (cy + 0.5) * chgt, f"{s:g}", color=fg,
+                    fontsize=9, weight=700, va="center", ha="left")
         # data cells
         for j, v in enumerate(matrix[i]):
             if (i, j) == blue_ij:
@@ -193,7 +197,8 @@ def render(d, png_path):
     ax.text(0.015, 0.028,
             "Green = positive (call) gamma exposure  \u00b7  "
             "Red = negative (put) gamma exposure  \u00b7  "
-            "Blue = bullish level  \u00b7  Yellow = bearish level",
+            "Blue = bullish level  \u00b7  Yellow = bearish level  \u00b7  "
+            "Top 18 strikes by gamma shown",
             color=GRAY, fontsize=8.5, va="top", ha="left")
 
     fig.savefig(png_path, dpi=200, facecolor=BG)
