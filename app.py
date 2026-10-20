@@ -25,7 +25,7 @@ import urllib.request
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, RedirectResponse
-from itsdangerous import URLSafeSerializer, BadSignature
+from itsdangerous import URLSafeSerializer, BadData, BadSignature
 
 import gex_heatmap
 import render_mpl
@@ -112,7 +112,7 @@ def session_user(request: Request) -> dict | None:
         return None
     try:
         u = signer.loads(tok)
-    except BadSignature:
+    except (BadSignature, BadData):
         return None
     if not isinstance(u, dict) or "tg_id" not in u:
         return None
