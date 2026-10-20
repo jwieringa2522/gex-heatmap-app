@@ -106,19 +106,30 @@ def render(d, png_path):
     ty0, ty1 = 0.055, 0.875
     cwdt = (tx1 - tx0) / n_cols
     chgt = (ty1 - ty0) / n_rows
+    # wider strike-label column so the wall tag fits beside the number
+    lab_w = cwdt * 1.7
+    data_w = (tx1 - tx0 - lab_w) / (n_cols - 1)
+
+    def colx(cx):
+        if cx <= 0:
+            return tx0
+        return tx0 + lab_w + (cx - 1) * data_w
+
+    def colw(cx):
+        return lab_w if cx == 0 else data_w
 
     def rect(cx, cy, color, alpha=1.0):
         if isinstance(color, tuple) and len(color) == 4:
             c, alpha = color[:3], color[3] * alpha
         else:
             c = color
-        ax.add_patch(Rectangle((tx0 + cx * cwdt, ty1 - (cy + 1) * chgt),
-                               cwdt, chgt, facecolor=c, alpha=alpha,
+        ax.add_patch(Rectangle((colx(cx), ty1 - (cy + 1) * chgt),
+                               colw(cx), chgt, facecolor=c, alpha=alpha,
                                edgecolor=(0x1c / 255, 0x23 / 255, 0x2e / 255),
                                linewidth=0.6))
 
     def text(cx, cy, s, color=WHITE, size=8.5, weight=400, dx=0.5, dy=0.5):
-        ax.text(tx0 + (cx + dx) * cwdt, ty1 - (cy + dy) * chgt, s,
+        ax.text(colx(cx) + dx * colw(cx), ty1 - (cy + dy) * chgt, s,
                 color=color, fontsize=size, weight=weight,
                 va="center", ha="center")
 
@@ -135,29 +146,29 @@ def render(d, png_path):
     # strike rows
     for i, s in enumerate(strikes):
         cy = i + 1
-        # strike label cell - numbers always white; spot row keeps its tint
-        if i == spot_i:
-            bg, fg = SPOTBG, WHITE
-        else:
-            bg, fg = PANEL, WHITE
-        # wall rows: standout cell tint + full "CALL WALL"/"PUT WALL" tag
-        # stacked under the number - everything stays inside the box
+        # strike label cell: numbers always white; spot cell is white w/ dark
+        # number so it pops; wall cells get a standout tint
         tag = None
         if cw[0] is not None and s == cw[0]:
-            tag = ("CALL WALL", SPOTFG)
-            if i != spot_i:
-                bg = (0x16 / 255, 0x5c / 255, 0x33 / 255)
+            tag = "CALL WALL"
+            bg, fg = (0x16 / 255, 0x5c / 255, 0x33 / 255), WHITE
         elif pw[0] is not None and s == pw[0]:
-            tag = ("PUT WALL", (0xf8 / 255, 0x71 / 255, 0x71 / 255))
-            if i != spot_i:
-                bg = (0x6b / 255, 0x22 / 255, 0x22 / 255)
+            tag = "PUT WALL"
+            bg, fg = (0x6b / 255, 0x22 / 255, 0x22 / 255), WHITE
+        elif i == spot_i:
+            bg, fg = (0xf2 / 255, 0xf2 / 255, 0xf2 / 255), (0x11 / 255,) * 3
+        else:
+            bg, fg = PANEL, WHITE
         rect(0, cy, bg)
-        sx = tx0 + 0.03 * cwdt
+        sx = tx0 + 0.04 * lab_w
         if tag:
-            ax.text(sx, ty1 - (cy + 0.28) * chgt, f"{s:g}", color=fg,
-                    fontsize=9, weight=700, va="center", ha="left")
-            ax.text(sx, ty1 - (cy + 0.74) * chgt, tag[0], color=tag[1],
-                    fontsize=6.5, weight=800, va="center", ha="left")
+            # tag sits right of the number in white; measured so they never
+            # overlap and always stay inside the label cell
+            tnum = ax.text(sx, ty1 - (cy + 0.5) * chgt, f"{s:g}", color=fg,
+                           fontsize=9, weight=700, va="center", ha="left")
+            nx1 = tnum.get_window_extent(renderer=renderer).x1 / fig_w_px
+            ax.text(nx1 + 0.006, ty1 - (cy + 0.5) * chgt, tag, color=WHITE,
+                    fontsize=7, weight=800, va="center", ha="left")
         else:
             ax.text(sx, ty1 - (cy + 0.5) * chgt, f"{s:g}", color=fg,
                     fontsize=9, weight=700, va="center", ha="left")
@@ -181,7 +192,7 @@ def render(d, png_path):
     # total row
     cy = n_rows - 1
     rect(0, cy, PANEL)
-    ax.text(tx0 + 0.03 * cwdt, ty1 - (cy + 0.5) * chgt, "Total", color=WHITE,
+    ax.text(tx0 + 0.04 * lab_w, ty1 - (cy + 0.5) * chgt, "Total", color=WHITE,
             fontsize=9, weight=700, va="center", ha="left")
     for j, v in enumerate(d["col_totals"]):
         color, fg = _cell_color(v, vmax)
