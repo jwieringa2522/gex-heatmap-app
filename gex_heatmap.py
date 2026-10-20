@@ -300,15 +300,25 @@ def page_extras(d):
     net = d["tot_call"] + d["tot_put"]
     lean = vd["lean"]
 
+    # Heaviest expiry: the expiry column holding the most gamma.
+    hexp_label = "-"
+    try:
+        cols = d.get("col_totals") or []
+        if cols and d.get("expiries"):
+            hexp_label = max(zip(d["expiries"], cols),
+                             key=lambda p: abs(p[1]))[0]["label"]
+    except Exception:
+        pass
     tiles = [
         {"k": "TICKER", "v": f"${ticker}", "c": ""},
-        {"k": "SPOT", "v": f"${spot:.2f}", "c": ""},
-        {"k": "PUT WALL", "v": f"${pw_s:g}" if pw_s is not None else "-",
-         "c": "r"},
-        {"k": "CALL WALL", "v": f"${cw_s:g}" if cw_s is not None else "-",
-         "c": "g"},
         {"k": "NET GEX", "v": _fmt_cell(net),
          "c": "r" if net < 0 else "g" if net > 0 else ""},
+        {"k": "HEAVIEST EXPIRY", "v": hexp_label, "c": ""},
+        {"k": "PUT WALL", "v": f"${pw_s:g}" if pw_s is not None else "-",
+         "c": "r"},
+        {"k": "SPOT", "v": f"${spot:.2f}", "c": ""},
+        {"k": "CALL WALL", "v": f"${cw_s:g}" if cw_s is not None else "-",
+         "c": "g"},
     ]
 
     cards = []
