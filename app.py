@@ -295,7 +295,7 @@ APP_PAGE = """<!DOCTYPE html>
   .step p b.r { color:#f87171; } .step p b.g { color:#4ade80; } .step p b.y { color:#facc15; }
   .step ul { list-style:none; margin:10px 0 0; padding:0; }
   .step li { position:relative; font-size:14px; line-height:1.55; color:#bbb; padding:5px 0 5px 20px; }
-  .step li:before { content:"\2022"; position:absolute; left:2px; top:5px; color:#30857a; font-weight:800; font-size:16px; }
+  .step li:before { content:"-"; position:absolute; left:4px; top:5px; color:#30857a; font-weight:800; font-size:15px; }
   .step li b { color:#fff; }
   .step li b.r { color:#f87171; } .step li b.g { color:#4ade80; } .step li b.y { color:#facc15; }
   .play { display:none; background:linear-gradient(180deg,#10151c,#0b0e13); border:1px solid #facc15; border-radius:16px; padding:26px 28px; margin:26px auto 0; max-width:1100px; text-align:left; }
