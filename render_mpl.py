@@ -140,24 +140,24 @@ def render(d, png_path):
             bg, fg = SPOTBG, SPOTFG
         else:
             bg, fg = PANEL, WHITE
-        rect(0, cy, bg)
-        # wall edge + tag
+        # wall rows: tint the whole label cell + stacked tag (no edge bar,
+        # no overlap - everything stays inside the box)
         tag = None
         if cw[0] is not None and s == cw[0]:
-            tag = ("CALL WALL", SPOTFG)
-            ax.add_patch(Rectangle((tx0, ty1 - (cy + 1) * chgt), 0.004, chgt,
-                                   facecolor=SPOTFG, edgecolor="none", zorder=3))
+            tag = ("WALL", SPOTFG)
+            if i != spot_i:
+                bg = (0x1a / 255, 0x3a / 255, 0x28 / 255)
         elif pw[0] is not None and s == pw[0]:
-            tag = ("PUT WALL", (0xf8 / 255, 0x71 / 255, 0x71 / 255))
-            ax.add_patch(Rectangle((tx0, ty1 - (cy + 1) * chgt), 0.004, chgt,
-                                   facecolor=(0xf8 / 255, 0x71 / 255, 0x71 / 255),
-                                   edgecolor="none", zorder=3))
+            tag = ("WALL", (0xf8 / 255, 0x71 / 255, 0x71 / 255))
+            if i != spot_i:
+                bg = (0x3d / 255, 0x1c / 255, 0x1c / 255)
+        rect(0, cy, bg)
         sx = tx0 + 0.03 * cwdt
         if tag:
-            # wall rows: strike number on top, tag below it - no overlap
-            ax.text(sx, ty1 - (cy + 0.34) * chgt, f"{s:g}", color=fg,
+            # wall rows: number on top, "WALL" below - sized to fit the row
+            ax.text(sx, ty1 - (cy + 0.30) * chgt, f"{s:g}", color=fg,
                     fontsize=9, weight=700, va="center", ha="left")
-            ax.text(sx, ty1 - (cy + 0.70) * chgt, tag[0], color=tag[1],
+            ax.text(sx, ty1 - (cy + 0.74) * chgt, tag[0], color=tag[1],
                     fontsize=6.5, weight=800, va="center", ha="left")
         else:
             ax.text(sx, ty1 - (cy + 0.5) * chgt, f"{s:g}", color=fg,
