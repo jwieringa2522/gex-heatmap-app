@@ -291,7 +291,10 @@ f.addEventListener('submit', async e=>{
   const ticker=t.value.trim().toUpperCase().replace(/^\\$/,'');
   if(!ticker) return;
   err.style.display='none'; res.style.display='none';
-  b.disabled=true; b.textContent='Building...';
+  b.disabled=true;
+  const STEPS=['Fetching option chain...','Crunching gamma...','Rendering heatmap...'];
+  let si=0; b.textContent=STEPS[0];
+  const stepTimer=setInterval(()=>{ si=(si+1)%STEPS.length; b.textContent=STEPS[si]; },1400);
   try{
     const r=await fetch('/api/go?ticker='+encodeURIComponent(ticker));
     const j=await r.json();
@@ -302,6 +305,7 @@ f.addEventListener('submit', async e=>{
     quota.textContent=j.left+' of 100 free heatmaps left this week';
     res.scrollIntoView({behavior:'smooth', block:'nearest'});
   }catch(ex){ err.textContent=ex.message; err.style.display='block'; }
+  clearInterval(stepTimer);
   b.disabled=false; b.textContent='Generate';
 });
 </script></body></html>
