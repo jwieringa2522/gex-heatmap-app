@@ -386,17 +386,12 @@ def page_extras(d):
         s = vd["suggestion"]
         noun = "put" if s["side"] == "puts" else "call"
         wall_v = pw_v if s["side"] == "puts" else cw_v
-        wall_word = f"{noun} wall"
-        cell = "yellow" if s["side"] == "puts" else "blue"
         play = {
             "side": s["side"], "strike": s["strike"], "expiry": s["expiry"],
             "body": (f"The {s['strike']} strike holds {_fmt_cell(wall_v)} of "
                      f"{noun} gamma - the single biggest {noun} pile on the "
                      f"map - and the biggest {noun} concentration expires "
                      f"{s['expiry']}."),
-            "why": (f"Why this strike and date: look for the {cell} cell on "
-                    f"the heatmap - that cell is this exact strike and "
-                    f"expiry."),
         }
 
     return {"verdict": vd, "tiles": tiles, "cards": cards, "play": play}

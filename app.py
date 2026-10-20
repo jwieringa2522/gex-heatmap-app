@@ -307,7 +307,7 @@ APP_PAGE = """<!DOCTYPE html>
   <h1>SPY BEFORE YOU BUY</h1>
   <div class="tag">WAIT. CONFIRM. EXECUTE.</div>
   <div class="who">Logged in as <b>__NAME__</b> &middot; <a href="/api/logout">log out</a></div>
-  <h2 style="font-weight:600; font-size:20px; margin-bottom:6px;">Free GEX Heatmap</h2>
+  <h2 style="font-weight:600; font-size:20px; margin-bottom:6px;">GEX Heatmap</h2>
   <p style="color:#888; font-size:14px; margin-top:0;">Type any ticker. See where the gamma walls are.</p>
   <form id="f">
     <input id="t" placeholder="$AAPL" maxlength="8" autocomplete="off">
@@ -322,7 +322,7 @@ APP_PAGE = """<!DOCTYPE html>
     <div class="play" id="play"></div>
     <p class="fine" id="fine" style="display:none">Not financial advice. This tool is for educational purposes only - options trading involves substantial risk of loss. Always do your own research before making any trade.</p>
   </div>
-  <div class="foot">Options data delayed ~15 min (CBOE) &middot; 100 free heatmaps per week<br>
+  <div class="foot">Options data delayed ~15 min (CBOE)<br>
   More from <a href="https://x.com/spybef0rey0ubuy">@spybef0rey0ubuy</a></div>
 </div>
 <script>
@@ -359,7 +359,7 @@ f.addEventListener('submit', async e=>{
     if(pl){
       play.innerHTML='<div class="kicker">MAP POINTS TO</div>'
         +'<div class="big"><span class="'+(pl.side==='puts'?'put':'call')+'">'+esc(pl.strike)+' '+esc(pl.side)+'</span> / '+esc(pl.expiry)+' expiry</div>'
-        +'<p>'+pl.body+'</p><div class="why">'+pl.why+'</div>';
+        +'<p>'+pl.body+'</p>';
       play.style.display='block';
     } else { play.style.display='none'; }
     fine.style.display='block';
