@@ -366,18 +366,46 @@ def page_extras(d):
                            f"{pos}. Net gamma is <b>{_fmt_cell(net)}</b>, "
                            f"so {regime}.")})
 
-    # 3. What to watch: walls move over time (unique beginner insight -
-    # the banner owns the verdict, card 1 owns the magnet, card 2 owns the
-    # price position, the play card owns the trade).
-    _wmove = ("Walls are not permanent - they are built from open options "
-              "and shift as expiry dates pass. The heaviest action right "
-              "now sits in the expiry named in the tile above.")
+    # 3. What to watch: expiry concentration. When one expiry holds most of
+    # the map's gamma, beginners misread the verdict as lasting for weeks -
+    # call it out with the losing side's wall for context.
+    w = None
+    cols = d.get("col_totals") or []
+    if cols and net != 0 and lean != "NEUTRAL":
+        tot_abs = sum(abs(c) for c in cols)
+        bi = max(range(len(cols)), key=lambda j: abs(cols[j]))
+        share = abs(cols[bi]) / tot_abs if tot_abs else 0
+        if share > 0.5:
+            be = d["expiries"][bi]
+            color_word = "green" if net > 0 else "red"
+            wall_s = pw_s if lean == "BULLISH" else cw_s
+            wall_name = "put wall" if lean == "BULLISH" else "call wall"
+            w = (f"Most of the {color_word} on this map expires soon - the "
+                 f"{be['label']} expiry ({be['dte']} days out) holds about "
+                 f"{share:.0%} of all gamma.")
+            if wall_s is not None:
+                wi = min(range(len(d["strikes"])),
+                         key=lambda i: abs(d["strikes"][i] - wall_s))
+                wrow = d["matrix"][wi]
+                wj = max(range(len(wrow)), key=lambda j: abs(wrow[j]))
+                we = d["expiries"][wj]
+                if we["label"] != be["label"]:
+                    when = "longer-dated" if we["dte"] > be["dte"] else "other"
+                    w += (f" The ${wall_s:g} {wall_name} is built on "
+                          f"{when} options, heaviest in {we['label']}.")
+    if w is None:
+        # generic fallback: walls move over time (unique beginner insight -
+        # the banner owns the verdict, card 1 owns the magnet, card 2 owns
+        # the price position, the play card owns the trade).
+        w = ("Walls are not permanent - they are built from open options "
+             "and shift as expiry dates pass. The heaviest action right "
+             "now sits in the expiry named in the tile above.")
     if lean == "NEUTRAL":
-        w = (_wmove + " No single strike stands out today, so there is no "
-             "MAP POINTS TO card.")
+        w += (" No single strike stands out today, so there is no MAP "
+              "POINTS TO card.")
     else:
-        w = (_wmove + " The MAP POINTS TO card below names the exact strike "
-             "and date.")
+        w += (" The MAP POINTS TO card below names the exact strike and "
+              "date.")
     cards.append({"n": 3, "title": "WHAT TO WATCH", "html": w, "hot": False})
 
     # MAP POINTS TO play card (the recommended option display).
