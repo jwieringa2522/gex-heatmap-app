@@ -135,27 +135,26 @@ def render(d, png_path):
     # strike rows
     for i, s in enumerate(strikes):
         cy = i + 1
-        # strike label cell
+        # strike label cell - numbers always white; spot row keeps its tint
         if i == spot_i:
-            bg, fg = SPOTBG, SPOTFG
+            bg, fg = SPOTBG, WHITE
         else:
             bg, fg = PANEL, WHITE
-        # wall rows: tint the whole label cell + stacked tag (no edge bar,
-        # no overlap - everything stays inside the box)
+        # wall rows: standout cell tint + full "CALL WALL"/"PUT WALL" tag
+        # stacked under the number - everything stays inside the box
         tag = None
         if cw[0] is not None and s == cw[0]:
-            tag = ("WALL", SPOTFG)
+            tag = ("CALL WALL", SPOTFG)
             if i != spot_i:
-                bg = (0x1a / 255, 0x3a / 255, 0x28 / 255)
+                bg = (0x16 / 255, 0x5c / 255, 0x33 / 255)
         elif pw[0] is not None and s == pw[0]:
-            tag = ("WALL", (0xf8 / 255, 0x71 / 255, 0x71 / 255))
+            tag = ("PUT WALL", (0xf8 / 255, 0x71 / 255, 0x71 / 255))
             if i != spot_i:
-                bg = (0x3d / 255, 0x1c / 255, 0x1c / 255)
+                bg = (0x6b / 255, 0x22 / 255, 0x22 / 255)
         rect(0, cy, bg)
         sx = tx0 + 0.03 * cwdt
         if tag:
-            # wall rows: number on top, "WALL" below - sized to fit the row
-            ax.text(sx, ty1 - (cy + 0.30) * chgt, f"{s:g}", color=fg,
+            ax.text(sx, ty1 - (cy + 0.28) * chgt, f"{s:g}", color=fg,
                     fontsize=9, weight=700, va="center", ha="left")
             ax.text(sx, ty1 - (cy + 0.74) * chgt, tag[0], color=tag[1],
                     fontsize=6.5, weight=800, va="center", ha="left")
