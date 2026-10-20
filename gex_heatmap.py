@@ -310,10 +310,10 @@ def page_extras(d):
     except Exception:
         pass
     tiles = [
-        {"k": "TICKER", "v": f"${ticker}", "c": ""},
+        {"k": "TICKER", "v": f"{ticker}", "c": ""},
         {"k": "NET GEX", "v": _fmt_cell(net),
          "c": "r" if net < 0 else "g" if net > 0 else ""},
-        {"k": "HEAVIEST EXPIRY", "v": hexp_label, "c": ""},
+        {"k": "HEAVIEST-EXPIRY", "v": hexp_label, "c": ""},
         {"k": "PUT WALL", "v": f"${pw_s:g}" if pw_s is not None else "-",
          "c": "r"},
         {"k": "SPOT", "v": f"${spot:.2f}", "c": ""},
@@ -373,7 +373,7 @@ def page_extras(d):
                  f"Net gamma <b>{_fmt_cell(net)}</b> - neither side is in "
                  f"control")
     cards.append({"n": 2, "title": "SEE WHERE PRICE SITS", "hot": False,
-                  "points": [f"<b>${ticker}</b> trades at <b>${spot:.2f}</b>",
+                  "points": [f"<b>{ticker}</b> trades at <b>${spot:.2f}</b>",
                              pos_pt, regime_pt]})
 
     # 3. What to watch: expiry concentration. When one expiry holds most of
@@ -420,18 +420,58 @@ def page_extras(d):
     cards.append({"n": 3, "title": "WHAT TO WATCH", "points": pts,
                   "hot": False})
 
-    # MAP POINTS TO play card (the recommended option display).
+    # MAP POINTS TO play card: headline + factual read-strength line +
+    # short bullets. No letter/percentage grade - one grade can't honestly
+    # combine direction, timing, decay and IV without backtesting, so the
+    # card shows the real facts instead and lets them speak.
     play = None
     if vd["suggestion"]:
         s = vd["suggestion"]
         noun = "put" if s["side"] == "puts" else "call"
         wall_v = pw_v if s["side"] == "puts" else cw_v
+        opp_v = cw_v if s["side"] == "puts" else pw_v
+        opp_s = cw_s if s["side"] == "puts" else pw_s
+        snum = float(str(s["strike"]).replace("$", ""))
+        wi = min(range(len(d["strikes"])),
+                 key=lambda i: abs(d["strikes"][i] - snum))
+        wrow = d["matrix"][wi]
+        row_abs = sum(abs(v) for v in wrow)
+        ei = next((j for j, e in enumerate(d["expiries"])
+                   if e["label"] == s["expiry"]), None)
+        share = (abs(wrow[ei]) / row_abs) if (ei is not None and row_abs) else 0
+        dte = next((e["dte"] for e in d["expiries"]
+                    if e["label"] == s["expiry"]), None)
+        if opp_v and opp_s is not None:
+            dom = abs(wall_v) / abs(opp_v)
+            facts = (f"Wall {dom:.1f}x heavier than ${opp_s:g}, "
+                     f"{share:.0%} of it in {s['expiry']}")
+        else:
+            facts = (f"No opposing wall - {share:.0%} of the {noun} gamma "
+                     f"sits in {s['expiry']}")
+        if dte is not None and dte < 30:
+            facts += f" - only {dte} days left"
+        if dte is None:
+            decay = None
+        elif dte <= 7:
+            decay = (f"Only {dte} days to expiry - time decay is brutal "
+                     f"this close. The option bleeds value every day, "
+                     f"faster into expiry.")
+        elif dte <= 21:
+            decay = (f"{dte} days to expiry - decay is moderate now and "
+                     f"accelerates hard in the final week.")
+        elif dte <= 45:
+            decay = (f"{dte} days to expiry - decay is slow for now, but "
+                     f"it ramps up in the last 2-3 weeks.")
+        else:
+            decay = (f"{dte} days to expiry - plenty of time. Decay is "
+                     f"slow at this distance.")
+        points = [f"The {s['strike']} strike holds {_fmt_cell(wall_v)} of "
+                  f"{noun} gamma - the biggest {noun} pile on the map."]
+        if decay:
+            points.append(decay)
         play = {
             "side": s["side"], "strike": s["strike"], "expiry": s["expiry"],
-            "body": (f"The {s['strike']} strike holds {_fmt_cell(wall_v)} of "
-                     f"{noun} gamma - the single biggest {noun} pile on the "
-                     f"map - and the biggest {noun} concentration expires "
-                     f"{s['expiry']}."),
+            "facts": facts, "points": points,
         }
 
     return {"verdict": vd, "tiles": tiles, "cards": cards, "play": play}

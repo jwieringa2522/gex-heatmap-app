@@ -78,7 +78,7 @@ def render(d, png_path):
         return bb.x1 / fig_w_px  # axes spans full figure width
 
     # price sits right after the title
-    t0 = ax.text(0.015, 0.965, f"GEX Heatmap - ${ticker}  ",
+    t0 = ax.text(0.015, 0.965, f"GEX Heatmap - {ticker}  ",
                  color=WHITE, fontsize=15, weight=800, va="top", ha="left")
     ax.text(_after(t0) + 0.002, 0.962, f"${spot:,.2f}",
             color=GRAY, fontsize=11, va="top", ha="left")

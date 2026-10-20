@@ -280,6 +280,7 @@ APP_PAGE = """<!DOCTYPE html>
   #tiles { display:none; grid-template-columns:repeat(3,1fr); gap:8px; margin:0 auto 18px; max-width:1100px; padding:0 16px; }
   .tile { background:#0b0e13; border:1px solid #1c232e; border-radius:10px; padding:10px 6px; }
   .tile .k { font-size:10px; letter-spacing:2px; color:#777; }
+  .tile .k.long { font-size:8.5px; letter-spacing:1px; white-space:nowrap; }
   .tile .v { font-size:17px; font-weight:700; margin-top:4px; }
   .tile .v.r { color:#f87171; } .tile .v.g { color:#4ade80; } .tile .v.y { color:#facc15; }
   @media (max-width:700px){ #tiles{ grid-template-columns:repeat(3,1fr); } }
@@ -305,6 +306,10 @@ APP_PAGE = """<!DOCTYPE html>
   .play p { color:#ccc; font-size:15px; line-height:1.6; margin:0; }
   .play p b { color:#fff; }
   .play .why { margin-top:12px; padding-top:12px; border-top:1px solid #222; color:#999; font-size:14px; }
+  .play .facts { color:#999; font-size:14px; line-height:1.5; margin:4px 0 12px; }
+  .play ul.pbul { list-style:none; margin:0; padding:0; }
+  .play ul.pbul li { position:relative; color:#ccc; font-size:15px; line-height:1.6; padding:5px 0 5px 20px; }
+  .play ul.pbul li:before { content:"-"; position:absolute; left:4px; top:5px; color:#facc15; font-weight:800; }
   .fine { color:#999; font-size:13px; line-height:1.6; margin:26px auto 0; max-width:1100px; text-align:center; padding:16px 16px 0; border-top:1px solid #1c232e; }
   .foot { color:#555; font-size:12px; margin-top:36px; }
   .foot a { color:#30857a; text-decoration:none; }
@@ -352,7 +357,7 @@ f.addEventListener('submit', async e=>{
     const j=await r.json();
     if(!r.ok) throw new Error(j.detail||'Something went wrong');
     const ex=j.extras||{}, vd=ex.verdict||{};
-    tiles.innerHTML=(ex.tiles||[]).map(tl=>'<div class="tile"><div class="k">'+esc(tl.k)+'</div><div class="v '+esc(tl.c||'')+'">'+esc(tl.v)+'</div></div>').join('');
+    tiles.innerHTML=(ex.tiles||[]).map(tl=>'<div class="tile"><div class="k'+(tl.k.length>10?' long':'')+'">'+esc(tl.k)+'</div><div class="v '+esc(tl.c||'')+'">'+esc(tl.v)+'</div></div>').join('');
     tiles.style.display='grid';
     v.className=vd.lean==='BEARISH'?'bearish':vd.lean==='BULLISH'?'bullish':'neutral';
     v.innerHTML='<span class="lv">'+esc(vd.headline||'')+'</span> - '+esc(vd.clause||'');
@@ -366,9 +371,11 @@ f.addEventListener('submit', async e=>{
     steps.style.display='grid';
     const pl=ex.play;
     if(pl){
+      const ppts=(pl.points||[]).map(p=>'<li>'+p+'</li>').join('');
       play.innerHTML='<div class="kicker">MAP POINTS TO</div>'
         +'<div class="big"><span class="'+(pl.side==='puts'?'put':'call')+'">'+esc(pl.strike)+' '+esc(pl.side)+'</span> / '+esc(pl.expiry)+' expiry</div>'
-        +'<p>'+pl.body+'</p>';
+        +'<div class="facts">'+esc(pl.facts||'')+'</div>'
+        +'<ul class="pbul">'+ppts+'</ul>';
       play.style.display='block';
     } else { play.style.display='none'; }
     fine.style.display='block';
