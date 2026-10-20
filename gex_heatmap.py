@@ -231,6 +231,168 @@ def describe(d):
     return "\n\n".join([f"${ticker}"] + [f"- {p}" for p in pts])
 
 
+def verdict(d):
+    """Verdict banner + suggested play for the results page.
+
+    Returns dict with lean (BEARISH/BULLISH/NEUTRAL), headline, clause,
+    and suggestion (e.g. "$25 puts expiring Dec 18") or None.
+    """
+    ticker = d["ticker"]
+    cw, pw = d["call_wall"], d["put_wall"]
+    cw_s, cw_v = cw
+    pw_s, pw_v = pw
+    strikes, expiries, matrix = d["strikes"], d["expiries"], d["matrix"]
+
+    if pw_s is not None and cw_s is not None:
+        if abs(pw_v) >= 1.5 * abs(cw_v):
+            lean = "BEARISH"
+        elif abs(cw_v) >= 1.5 * abs(pw_v):
+            lean = "BULLISH"
+        else:
+            lean = "NEUTRAL"
+    elif pw_s is not None:
+        lean = "BEARISH"
+    elif cw_s is not None:
+        lean = "BULLISH"
+    else:
+        lean = "NEUTRAL"
+
+    clause = {"BEARISH": "the put side is in control",
+              "BULLISH": "the call side is in control",
+              "NEUTRAL": "neither side is in control"}[lean]
+
+    suggestion = None
+    if lean == "BEARISH" and d["bear_strike"] in strikes:
+        bi = strikes.index(d["bear_strike"])
+        bj = min(range(len(expiries)), key=lambda j: matrix[bi][j])
+        suggestion = {"side": "puts",
+                      "strike": f"${d['bear_strike']:g}",
+                      "expiry": expiries[bj]["label"],
+                      "text": (f"${d['bear_strike']:g} puts expiring "
+                               f"{expiries[bj]['label']}")}
+    elif lean == "BULLISH" and d["bull_strike"] in strikes:
+        bi = strikes.index(d["bull_strike"])
+        bj = max(range(len(expiries)), key=lambda j: matrix[bi][j])
+        suggestion = {"side": "calls",
+                      "strike": f"${d['bull_strike']:g}",
+                      "expiry": expiries[bj]["label"],
+                      "text": (f"${d['bull_strike']:g} calls expiring "
+                               f"{expiries[bj]['label']}")}
+
+    return {"lean": lean,
+            "headline": f"{ticker} looks {lean} right now",
+            "clause": clause,
+            "suggestion": suggestion}
+
+
+def page_extras(d):
+    """Stat tiles + beginner 1-2-3 walkthrough cards for the results page.
+
+    Returns {"verdict": verdict(d), "tiles": [...], "cards": [...]}.
+    Tiles are {"k": label, "v": value, "c": color class ("r"/"g"/"y"/"")}.
+    Cards are {"n": number, "title": str, "html": str, "hot": bool}.
+    """
+    vd = verdict(d)
+    ticker, spot = d["ticker"], d["spot"]
+    cw, pw = d["call_wall"], d["put_wall"]
+    cw_s, cw_v = cw
+    pw_s, pw_v = pw
+    net = d["tot_call"] + d["tot_put"]
+    lean = vd["lean"]
+
+    tiles = [
+        {"k": "TICKER", "v": f"${ticker}", "c": ""},
+        {"k": "SPOT", "v": f"${spot:.2f}", "c": ""},
+        {"k": "PUT WALL", "v": f"${pw_s:g}" if pw_s is not None else "-",
+         "c": "r"},
+        {"k": "CALL WALL", "v": f"${cw_s:g}" if cw_s is not None else "-",
+         "c": "g"},
+        {"k": "NET GEX", "v": _fmt_cell(net),
+         "c": "r" if net < 0 else "g" if net > 0 else ""},
+        {"k": "LEAN", "v": lean,
+         "c": "y" if lean == "BEARISH" else "g" if lean == "BULLISH" else ""},
+    ]
+
+    cards = []
+    # 1. Find the walls.
+    if pw_s is not None and cw_s is not None:
+        pw_a, cw_a = abs(pw_v), abs(cw_v)
+        if pw_a >= cw_a:
+            heavy, ratio = "put", pw_a / cw_a if cw_a else 99
+        else:
+            heavy, ratio = "call", cw_a / pw_a if pw_a else 99
+        html = (f"Big money clusters at two strikes: the "
+                f"<b class=\"r\">${pw_s:g} put wall</b> ({_fmt_cell(pw_v)}) "
+                f"below and the <b class=\"g\">${cw_s:g} call wall</b> "
+                f"({_fmt_cell(cw_v)}) above. The {heavy} wall is about "
+                f"{int(round(ratio))}x heavier - that is the magnet.")
+    elif pw_s is not None:
+        html = (f"Big money clusters below: the "
+                f"<b class=\"r\">${pw_s:g} put wall</b> ({_fmt_cell(pw_v)}). "
+                f"No real call wall above - the magnet points down.")
+    elif cw_s is not None:
+        html = (f"Big money clusters above: the "
+                f"<b class=\"g\">${cw_s:g} call wall</b> ({_fmt_cell(cw_v)}). "
+                f"No real put wall below - the magnet points up.")
+    else:
+        html = "No clear gamma walls on this chain - positioning is scattered."
+    cards.append({"n": 1, "title": "FIND THE WALLS", "html": html,
+                  "hot": False})
+
+    # 2. See where price sits.
+    if pw_s is not None and cw_s is not None:
+        if spot <= pw_s * 1.03:
+            pos = f"pressing the <b class=\"r\">${pw_s:g} put wall</b>"
+        elif spot >= cw_s * 0.97:
+            pos = f"pressing the <b class=\"g\">${cw_s:g} call wall</b>"
+        else:
+            near = "put" if abs(spot - pw_s) < abs(spot - cw_s) else "call"
+            pos = f"between the walls, closer to the {near} wall"
+    else:
+        pos = "on the map"
+    regime = ("the put side is winning and swings get bigger" if net < 0
+              else "the call side is winning and price gets choppy" if net > 0
+              else "neither side is in control")
+    cards.append({"n": 2, "title": "SEE WHERE PRICE SITS", "hot": False,
+                  "html": (f"<b>${ticker}</b> trades at <b>${spot:.2f}</b>, "
+                           f"{pos}. Net gamma is <b>{_fmt_cell(net)}</b>, "
+                           f"so {regime}.")})
+
+    # 3. The trade the map points to.
+    if vd["suggestion"]:
+        side = "put" if lean == "BEARISH" else "call"
+        c3 = (f"<b class=\"y\">{vd['suggestion']['text']}</b>. That strike "
+              f"holds the heaviest {side} gamma on the map. "
+              f"Verdict: <b class=\"y\">{lean}</b>.")
+    else:
+        c3 = (f"No single strike stands out - the walls are evenly matched. "
+              f"Verdict: <b>{lean}</b>.")
+    cards.append({"n": 3, "title": "THE TRADE THE MAP POINTS TO", "html": c3,
+                  "hot": True})
+
+    # MAP POINTS TO play card (the recommended option display).
+    play = None
+    if vd["suggestion"]:
+        s = vd["suggestion"]
+        noun = "put" if s["side"] == "puts" else "call"
+        wall_v = pw_v if s["side"] == "puts" else cw_v
+        wall_word = f"{noun} wall"
+        cell = "yellow" if s["side"] == "puts" else "blue"
+        play = {
+            "side": s["side"], "strike": s["strike"], "expiry": s["expiry"],
+            "body": (f"{ticker} looks <b>{lean}</b> right now. The "
+                     f"{s['strike']} strike holds {_fmt_cell(wall_v)} of "
+                     f"{noun} gamma - the heaviest magnet on the map - and "
+                     f"the biggest {noun} concentration expires "
+                     f"{s['expiry']}."),
+            "why": (f"Why this strike and date: the {cell} cell on the "
+                    f"heatmap marks the single biggest {noun}-gamma expiry "
+                    f"pile at the {wall_word}."),
+        }
+
+    return {"verdict": vd, "tiles": tiles, "cards": cards, "play": play}
+
+
 def render_html(d):
     ticker, spot = d["ticker"], d["spot"]
     strikes, expiries = d["strikes"], d["expiries"]

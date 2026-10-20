@@ -176,35 +176,50 @@ def _fresh(png_path: str) -> bool:
 
 
 def get_or_build(ticker: str, user: dict):
-    """Returns (png_path, read, as_of_ts, from_cache, left). Raises on error."""
+    """Returns (png_path, read, as_of_ts, extras, from_cache, left). Raises on error."""
     tg_id = int(user["tg_id"])
     username = user.get("username", "")
     png_path, txt_path, meta_path = _paths(ticker)
+    extras_path = txt_path + ".extras.json"
     left = uses_left(tg_id)
-    if _fresh(png_path):
+
+    def _load_extras():
+        try:
+            with open(extras_path) as f:
+                ex = json.load(f)
+            if isinstance(ex, dict) and "cards" in ex and "tiles" in ex:
+                return ex
+        except (OSError, ValueError):
+            pass
+        return None
+
+    if _fresh(png_path) and _load_extras() is not None:
         with open(txt_path) as f:
             read = f.read()
         as_of = open(meta_path).read() if os.path.exists(meta_path) else ""
-        return png_path, read, as_of, True, left
+        return png_path, read, as_of, _load_extras(), True, left
     if left <= 0:
         raise PermissionError(
             "You've used all 100 free heatmaps for this week. "
             "Your quota resets 7 days after your first one.")
     with BUILD_LOCK:
-        if _fresh(png_path):
+        if _fresh(png_path) and _load_extras() is not None:
             with open(txt_path) as f:
                 read = f.read()
             as_of = open(meta_path).read() if os.path.exists(meta_path) else ""
-            return png_path, read, as_of, True, left
+            return png_path, read, as_of, _load_extras(), True, left
         d = gex_heatmap.heatmap_data(ticker)
         render_mpl.render(d, png_path)
         read = gex_heatmap.describe(d)
+        ex = gex_heatmap.page_extras(d)
         with open(txt_path, "w") as f:
             f.write(read)
         with open(meta_path, "w") as f:
             f.write(d.get("as_of_ts", ""))
+        with open(extras_path, "w") as f:
+            json.dump(ex, f)
         record_build(tg_id, username, ticker)
-        return png_path, read, d.get("as_of_ts", ""), False, uses_left(tg_id)
+        return png_path, read, d.get("as_of_ts", ""), ex, False, uses_left(tg_id)
 
 
 # ---------- pages ----------
@@ -239,7 +254,7 @@ APP_PAGE = """<!DOCTYPE html>
 <title>SPY BEFORE YOU BUY - Free GEX Heatmap</title>
 <style>
   * { box-sizing: border-box; }
-  body { background:#000; color:#fff; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; margin:0; padding:24px 16px 48px; }
+  body { background:#000; color:#fff; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; margin:0; padding:24px 16px 48px; overflow-x:hidden; }
   .wrap { max-width:920px; margin:0 auto; text-align:center; }
   h1 { font-size:clamp(28px,6vw,52px); font-weight:800; letter-spacing:2px; margin:24px 0 4px; }
   .tag { color:#30857a; letter-spacing:6px; font-size:12px; font-weight:600; margin-bottom:28px; }
@@ -253,8 +268,40 @@ APP_PAGE = """<!DOCTYPE html>
   .quota { color:#888; font-size:13px; margin-bottom:28px; }
   #err { color:#f87171; margin:16px 0; display:none; }
   #result { display:none; margin-top:8px; }
-  #result img { width:100%; border-radius:12px; border:1px solid #222; }
-  #read { text-align:left; background:#0b0e13; border:1px solid #1c232e; border-radius:12px; padding:18px 22px; margin-top:16px; white-space:pre-line; font-size:15px; line-height:1.5; }
+  #verdict { display:none; width:100vw; margin-left:calc(50% - 50vw); text-align:center; padding:14px 16px; font-size:19px; font-weight:700; border-top:1px solid; border-bottom:1px solid; }
+  #verdict small { display:block; font-weight:400; font-size:13px; color:#aaa; margin-top:4px; }
+  #verdict.bearish { background:rgba(239,68,68,.12); border-color:rgba(239,68,68,.5); }
+  #verdict.bearish .lv { color:#f87171; }
+  #verdict.bullish { background:rgba(34,197,94,.12); border-color:rgba(34,197,94,.5); }
+  #verdict.bullish .lv { color:#4ade80; }
+  #verdict.neutral { background:rgba(148,163,184,.10); border-color:rgba(148,163,184,.4); }
+  #verdict.neutral .lv { color:#cbd5e1; }
+  .bleed { width:100vw; margin-left:calc(50% - 50vw); }
+  .bleed img { width:100%; display:block; border-top:1px solid #222; border-bottom:1px solid #222; }
+  #tiles { display:none; grid-template-columns:repeat(6,1fr); gap:8px; margin:0 auto 18px; max-width:1100px; padding:0 16px; }
+  .tile { background:#0b0e13; border:1px solid #1c232e; border-radius:10px; padding:10px 6px; }
+  .tile .k { font-size:10px; letter-spacing:2px; color:#777; }
+  .tile .v { font-size:17px; font-weight:700; margin-top:4px; }
+  .tile .v.r { color:#f87171; } .tile .v.g { color:#4ade80; } .tile .v.y { color:#facc15; }
+  @media (max-width:700px){ #tiles{ grid-template-columns:repeat(3,1fr); } }
+  #steps { display:none; max-width:1100px; margin:26px auto 0; padding:0 16px; grid-template-columns:repeat(3,1fr); gap:14px; text-align:left; }
+  @media (max-width:700px){ #steps{ grid-template-columns:1fr; } }
+  .step { background:#0b0e13; border:1px solid #1c232e; border-radius:14px; padding:20px; }
+  .step.hot { border-color:rgba(250,204,21,.55); }
+  .step .num { display:inline-flex; width:34px; height:34px; border-radius:50%; background:#30857a; color:#fff; font-weight:800; align-items:center; justify-content:center; margin-bottom:12px; }
+  .step.hot .num { background:#facc15; color:#000; }
+  .step h4 { font-size:14px; letter-spacing:1px; margin:0 0 10px; }
+  .step p { font-size:14px; line-height:1.7; color:#bbb; margin:0; }
+  .step p b { color:#fff; }
+  .step p b.r { color:#f87171; } .step p b.g { color:#4ade80; } .step p b.y { color:#facc15; }
+  .play { display:none; background:linear-gradient(180deg,#10151c,#0b0e13); border:1px solid #facc15; border-radius:16px; padding:26px 28px; margin:26px auto 0; max-width:1100px; text-align:left; }
+  .play .kicker { color:#facc15; font-size:12px; font-weight:800; letter-spacing:3px; margin-bottom:10px; }
+  .play .big { font-size:30px; font-weight:800; margin-bottom:10px; }
+  .play .big .put { color:#f87171; } .play .big .call { color:#4ade80; }
+  .play p { color:#ccc; font-size:15px; line-height:1.6; margin:0; }
+  .play p b { color:#fff; }
+  .play .why { margin-top:12px; padding-top:12px; border-top:1px solid #222; color:#999; font-size:14px; }
+  .fine { color:#555; font-size:12px; margin-top:18px; text-align:center; }
   .foot { color:#555; font-size:12px; margin-top:36px; }
   .foot a { color:#30857a; text-decoration:none; }
 </style></head><body><div class="wrap">
@@ -270,8 +317,12 @@ APP_PAGE = """<!DOCTYPE html>
   <div class="quota" id="quota"></div>
   <div id="err"></div>
   <div id="result">
-    <img id="img" alt="GEX heatmap">
-    <div id="read"></div>
+    <div id="tiles"></div>
+    <div id="verdict"></div>
+    <div class="bleed"><img id="img" alt="GEX heatmap"></div>
+    <div id="steps"></div>
+    <div class="play" id="play"></div>
+    <p class="fine" id="fine" style="display:none">Not financial advice - for education only.</p>
   </div>
   <div class="foot">Options data delayed ~15 min (CBOE) &middot; 100 free heatmaps per week<br>
   More from <a href="https://x.com/spybef0rey0ubuy">@spybef0rey0ubuy</a></div>
@@ -280,7 +331,11 @@ APP_PAGE = """<!DOCTYPE html>
 const f=document.getElementById('f'), t=document.getElementById('t'),
       b=document.getElementById('b'), err=document.getElementById('err'),
       res=document.getElementById('result'), img=document.getElementById('img'),
-      read=document.getElementById('read'), quota=document.getElementById('quota');
+      v=document.getElementById('verdict'), tiles=document.getElementById('tiles'),
+      steps=document.getElementById('steps'), fine=document.getElementById('fine'),
+      play=document.getElementById('play'),
+      quota=document.getElementById('quota');
+function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function refreshQuota(){
   try{ const r=await fetch('/api/quota'); const j=await r.json();
     quota.textContent = j.left + ' of 100 free heatmaps left this week'; }catch(e){}
@@ -299,8 +354,24 @@ f.addEventListener('submit', async e=>{
     const r=await fetch('/api/go?ticker='+encodeURIComponent(ticker));
     const j=await r.json();
     if(!r.ok) throw new Error(j.detail||'Something went wrong');
+    const ex=j.extras||{}, vd=ex.verdict||{};
+    tiles.innerHTML=(ex.tiles||[]).map(tl=>'<div class="tile"><div class="k">'+esc(tl.k)+'</div><div class="v '+esc(tl.c||'')+'">'+esc(tl.v)+'</div></div>').join('');
+    tiles.style.display='grid';
+    v.className=vd.lean==='BEARISH'?'bearish':vd.lean==='BULLISH'?'bullish':'neutral';
+    v.innerHTML='<span class="lv">'+esc(vd.headline||'')+'</span> - '+esc(vd.clause||'')
+      +'<small>Chain as of '+esc(j.as_of||'')+' (CBOE delayed ~15 min)</small>';
+    v.style.display='block';
     img.src='/i/'+encodeURIComponent(ticker)+'.png?ts='+Date.now();
-    read.textContent=j.read;
+    steps.innerHTML=(ex.cards||[]).map(c=>'<div class="step'+(c.hot?' hot':'')+'"><div class="num">'+c.n+'</div><h4>'+esc(c.title)+'</h4><p>'+c.html+'</p></div>').join('');
+    steps.style.display='grid';
+    const pl=ex.play;
+    if(pl){
+      play.innerHTML='<div class="kicker">MAP POINTS TO</div>'
+        +'<div class="big"><span class="'+(pl.side==='puts'?'put':'call')+'">'+esc(pl.strike)+' '+esc(pl.side)+'</span> / '+esc(pl.expiry)+' expiry</div>'
+        +'<p>'+pl.body+'</p><div class="why">'+pl.why+'</div>';
+      play.style.display='block';
+    } else { play.style.display='none'; }
+    fine.style.display='block';
     res.style.display='block';
     quota.textContent=j.left+' of 100 free heatmaps left this week';
     res.scrollIntoView({behavior:'smooth', block:'nearest'});
@@ -384,7 +455,7 @@ def go(ticker: str, request: Request):
             {"detail": "Enter a valid ticker (letters only, e.g. AAPL)."},
             status_code=400)
     try:
-        _png, read, as_of, _cached, left = get_or_build(ticker, u)
+        _png, read, as_of, ex, _cached, left = get_or_build(ticker, u)
     except PermissionError as e:
         return JSONResponse({"detail": str(e)}, status_code=429)
     except RuntimeError:
@@ -395,7 +466,7 @@ def go(ticker: str, request: Request):
         return JSONResponse(
             {"detail": "Couldn't build the heatmap right now - try again in a minute."},
             status_code=500)
-    return {"read": read, "as_of": as_of, "left": left}
+    return {"read": read, "as_of": as_of, "extras": ex, "left": left}
 
 
 @app.get("/i/{name}.png")
