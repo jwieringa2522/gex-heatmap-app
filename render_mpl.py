@@ -106,8 +106,10 @@ def render(d, png_path):
     ty0, ty1 = 0.055, 0.875
     cwdt = (tx1 - tx0) / n_cols
     chgt = (ty1 - ty0) / n_rows
-    # wider strike-label column so the wall tag fits beside the number
-    lab_w = cwdt * 1.7
+    # strike-label column: original width, widened only as much as the
+    # "CALL WALL"/"PUT WALL" tag beside the number strictly needs (0.082
+    # axes ~ 210px fits number + gap + tag with margin)
+    lab_w = max(cwdt, 0.082)
     data_w = (tx1 - tx0 - lab_w) / (n_cols - 1)
 
     def colx(cx):
