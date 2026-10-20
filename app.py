@@ -265,7 +265,6 @@ APP_PAGE = """<!DOCTYPE html>
   input:focus { outline:none; border-color:#30857a; }
   button { background:#30857a; color:#fff; border:none; font-size:16px; font-weight:700; padding:12px 28px; border-radius:10px; cursor:pointer; }
   button:disabled { opacity:.5; cursor:wait; }
-  .quota { color:#888; font-size:13px; margin-bottom:28px; }
   #err { color:#f87171; margin:16px 0; display:none; }
   #result { display:none; margin-top:8px; }
   #verdict { display:none; width:100vw; margin-left:calc(50% - 50vw); text-align:center; padding:14px 16px; font-size:19px; font-weight:700; border-top:1px solid; border-bottom:1px solid; }
@@ -314,7 +313,6 @@ APP_PAGE = """<!DOCTYPE html>
     <input id="t" placeholder="$AAPL" maxlength="8" autocomplete="off">
     <button id="b" type="submit">Generate</button>
   </form>
-  <div class="quota" id="quota"></div>
   <div id="err"></div>
   <div id="result">
     <div id="tiles"></div>
@@ -333,14 +331,8 @@ const f=document.getElementById('f'), t=document.getElementById('t'),
       res=document.getElementById('result'), img=document.getElementById('img'),
       v=document.getElementById('verdict'), tiles=document.getElementById('tiles'),
       steps=document.getElementById('steps'), fine=document.getElementById('fine'),
-      play=document.getElementById('play'),
-      quota=document.getElementById('quota');
+      play=document.getElementById('play');
 function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-async function refreshQuota(){
-  try{ const r=await fetch('/api/quota'); const j=await r.json();
-    quota.textContent = j.left + ' of 100 free heatmaps left this week'; }catch(e){}
-}
-refreshQuota();
 f.addEventListener('submit', async e=>{
   e.preventDefault();
   const ticker=t.value.trim().toUpperCase().replace(/^\\$/,'');
@@ -358,8 +350,7 @@ f.addEventListener('submit', async e=>{
     tiles.innerHTML=(ex.tiles||[]).map(tl=>'<div class="tile"><div class="k">'+esc(tl.k)+'</div><div class="v '+esc(tl.c||'')+'">'+esc(tl.v)+'</div></div>').join('');
     tiles.style.display='grid';
     v.className=vd.lean==='BEARISH'?'bearish':vd.lean==='BULLISH'?'bullish':'neutral';
-    v.innerHTML='<span class="lv">'+esc(vd.headline||'')+'</span> - '+esc(vd.clause||'')
-      +'<small>Chain as of '+esc(j.as_of||'')+' (CBOE delayed ~15 min)</small>';
+    v.innerHTML='<span class="lv">'+esc(vd.headline||'')+'</span> - '+esc(vd.clause||'');
     v.style.display='block';
     img.src='/i/'+encodeURIComponent(ticker)+'.png?ts='+Date.now();
     steps.innerHTML=(ex.cards||[]).map(c=>'<div class="step'+(c.hot?' hot':'')+'"><div class="num">'+c.n+'</div><h4>'+esc(c.title)+'</h4><p>'+c.html+'</p></div>').join('');
@@ -373,7 +364,6 @@ f.addEventListener('submit', async e=>{
     } else { play.style.display='none'; }
     fine.style.display='block';
     res.style.display='block';
-    quota.textContent=j.left+' of 100 free heatmaps left this week';
     res.scrollIntoView({behavior:'smooth', block:'nearest'});
   }catch(ex){ err.textContent=ex.message; err.style.display='block'; }
   clearInterval(stepTimer);

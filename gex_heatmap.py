@@ -31,10 +31,10 @@ from gamma import _OPT_PAT, _last_trading_day
 
 STRIKE_BAND = 0.25   # strikes within +-25% of spot
 MAX_ROWS = 18        # fills the 16:9 frame
-N_EXPIRIES = 12
+N_EXPIRIES = 15
 
 
-def heatmap_data(ticker: str, max_dte: int = 90, n_expiries: int = N_EXPIRIES,
+def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
                  ref_date: date = None, max_rows: int = MAX_ROWS):
     """Per-(strike, expiry) net GEX matrix. Returns dict or raises RuntimeError."""
     ref_date = _last_trading_day(ref_date or date.today())
@@ -366,23 +366,18 @@ def page_extras(d):
                            f"{pos}. Net gamma is <b>{_fmt_cell(net)}</b>, "
                            f"so {regime}.")})
 
-    # 3. What to watch (implications only - the play card owns the trade).
-    if lean == "BEARISH":
-        w = (f"The verdict is <b class=\"y\">BEARISH</b> - the put side is in "
-             f"control. Expect wider swings, with the "
-             f"<b class=\"r\">${pw_s:g} put wall</b> below acting as the "
-             f"magnet. The MAP POINTS TO card below names the exact strike "
-             f"and date.")
-    elif lean == "BULLISH":
-        w = (f"The verdict is <b class=\"g\">BULLISH</b> - the call side is "
-             f"in control. Expect choppy, pinned price action, with the "
-             f"<b class=\"g\">${cw_s:g} call wall</b> above acting as the "
-             f"magnet. The MAP POINTS TO card below names the exact strike "
-             f"and date.")
+    # 3. What to watch: walls move over time (unique beginner insight -
+    # the banner owns the verdict, card 1 owns the magnet, card 2 owns the
+    # price position, the play card owns the trade).
+    _wmove = ("Walls are not permanent - they are built from open options "
+              "and shift as expiry dates pass. The heaviest action right "
+              "now sits in the expiry named in the tile above.")
+    if lean == "NEUTRAL":
+        w = (_wmove + " No single strike stands out today, so there is no "
+             "MAP POINTS TO card.")
     else:
-        w = (f"The verdict is <b>NEUTRAL</b> - neither side is in control. "
-             f"Expect price to chop between the walls. No single strike "
-             f"stands out, so there is no MAP POINTS TO card today.")
+        w = (_wmove + " The MAP POINTS TO card below names the exact strike "
+             "and date.")
     cards.append({"n": 3, "title": "WHAT TO WATCH", "html": w, "hot": False})
 
     # MAP POINTS TO play card (the recommended option display).
@@ -395,14 +390,13 @@ def page_extras(d):
         cell = "yellow" if s["side"] == "puts" else "blue"
         play = {
             "side": s["side"], "strike": s["strike"], "expiry": s["expiry"],
-            "body": (f"{ticker} looks <b>{lean}</b> right now. The "
-                     f"{s['strike']} strike holds {_fmt_cell(wall_v)} of "
-                     f"{noun} gamma - the heaviest magnet on the map - and "
-                     f"the biggest {noun} concentration expires "
+            "body": (f"The {s['strike']} strike holds {_fmt_cell(wall_v)} of "
+                     f"{noun} gamma - the single biggest {noun} pile on the "
+                     f"map - and the biggest {noun} concentration expires "
                      f"{s['expiry']}."),
-            "why": (f"Why this strike and date: the {cell} cell on the "
-                    f"heatmap marks the single biggest {noun}-gamma expiry "
-                    f"pile at the {wall_word}."),
+            "why": (f"Why this strike and date: look for the {cell} cell on "
+                    f"the heatmap - that cell is this exact strike and "
+                    f"expiry."),
         }
 
     return {"verdict": vd, "tiles": tiles, "cards": cards, "play": play}
