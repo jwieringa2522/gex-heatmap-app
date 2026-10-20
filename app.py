@@ -278,7 +278,7 @@ APP_PAGE = """<!DOCTYPE html>
   #verdict.neutral .lv { color:#cbd5e1; }
   .bleed { width:100vw; margin-left:calc(50% - 50vw); }
   .bleed img { width:100%; display:block; border-top:1px solid #222; border-bottom:1px solid #222; }
-  #tiles { display:none; grid-template-columns:repeat(6,1fr); gap:8px; margin:0 auto 18px; max-width:1100px; padding:0 16px; }
+  #tiles { display:none; grid-template-columns:repeat(5,1fr); gap:8px; margin:0 auto 18px; max-width:1100px; padding:0 16px; }
   .tile { background:#0b0e13; border:1px solid #1c232e; border-radius:10px; padding:10px 6px; }
   .tile .k { font-size:10px; letter-spacing:2px; color:#777; }
   .tile .v { font-size:17px; font-weight:700; margin-top:4px; }
@@ -301,7 +301,7 @@ APP_PAGE = """<!DOCTYPE html>
   .play p { color:#ccc; font-size:15px; line-height:1.6; margin:0; }
   .play p b { color:#fff; }
   .play .why { margin-top:12px; padding-top:12px; border-top:1px solid #222; color:#999; font-size:14px; }
-  .fine { color:#555; font-size:12px; margin-top:18px; text-align:center; }
+  .fine { color:#999; font-size:13px; line-height:1.6; margin:26px auto 0; max-width:1100px; text-align:center; padding:16px 16px 0; border-top:1px solid #1c232e; }
   .foot { color:#555; font-size:12px; margin-top:36px; }
   .foot a { color:#30857a; text-decoration:none; }
 </style></head><body><div class="wrap">
@@ -322,7 +322,7 @@ APP_PAGE = """<!DOCTYPE html>
     <div class="bleed"><img id="img" alt="GEX heatmap"></div>
     <div id="steps"></div>
     <div class="play" id="play"></div>
-    <p class="fine" id="fine" style="display:none">Not financial advice - for education only.</p>
+    <p class="fine" id="fine" style="display:none">Not financial advice. This tool is for educational purposes only - options trading involves substantial risk of loss. Always do your own research before making any trade.</p>
   </div>
   <div class="foot">Options data delayed ~15 min (CBOE) &middot; 100 free heatmaps per week<br>
   More from <a href="https://x.com/spybef0rey0ubuy">@spybef0rey0ubuy</a></div>

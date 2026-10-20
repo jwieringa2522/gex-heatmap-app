@@ -31,10 +31,10 @@ from gamma import _OPT_PAT, _last_trading_day
 
 STRIKE_BAND = 0.25   # strikes within +-25% of spot
 MAX_ROWS = 18        # fills the 16:9 frame
-N_EXPIRIES = 8
+N_EXPIRIES = 12
 
 
-def heatmap_data(ticker: str, max_dte: int = 60, n_expiries: int = N_EXPIRIES,
+def heatmap_data(ticker: str, max_dte: int = 90, n_expiries: int = N_EXPIRIES,
                  ref_date: date = None, max_rows: int = MAX_ROWS):
     """Per-(strike, expiry) net GEX matrix. Returns dict or raises RuntimeError."""
     ref_date = _last_trading_day(ref_date or date.today())
@@ -309,8 +309,6 @@ def page_extras(d):
          "c": "g"},
         {"k": "NET GEX", "v": _fmt_cell(net),
          "c": "r" if net < 0 else "g" if net > 0 else ""},
-        {"k": "LEAN", "v": lean,
-         "c": "y" if lean == "BEARISH" else "g" if lean == "BULLISH" else ""},
     ]
 
     cards = []
@@ -358,17 +356,24 @@ def page_extras(d):
                            f"{pos}. Net gamma is <b>{_fmt_cell(net)}</b>, "
                            f"so {regime}.")})
 
-    # 3. The trade the map points to.
-    if vd["suggestion"]:
-        side = "put" if lean == "BEARISH" else "call"
-        c3 = (f"<b class=\"y\">{vd['suggestion']['text']}</b>. That strike "
-              f"holds the heaviest {side} gamma on the map. "
-              f"Verdict: <b class=\"y\">{lean}</b>.")
+    # 3. What to watch (implications only - the play card owns the trade).
+    if lean == "BEARISH":
+        w = (f"The verdict is <b class=\"y\">BEARISH</b> - the put side is in "
+             f"control. Expect wider swings, with the "
+             f"<b class=\"r\">${pw_s:g} put wall</b> below acting as the "
+             f"magnet. The MAP POINTS TO card below names the exact strike "
+             f"and date.")
+    elif lean == "BULLISH":
+        w = (f"The verdict is <b class=\"g\">BULLISH</b> - the call side is "
+             f"in control. Expect choppy, pinned price action, with the "
+             f"<b class=\"g\">${cw_s:g} call wall</b> above acting as the "
+             f"magnet. The MAP POINTS TO card below names the exact strike "
+             f"and date.")
     else:
-        c3 = (f"No single strike stands out - the walls are evenly matched. "
-              f"Verdict: <b>{lean}</b>.")
-    cards.append({"n": 3, "title": "THE TRADE THE MAP POINTS TO", "html": c3,
-                  "hot": True})
+        w = (f"The verdict is <b>NEUTRAL</b> - neither side is in control. "
+             f"Expect price to chop between the walls. No single strike "
+             f"stands out, so there is no MAP POINTS TO card today.")
+    cards.append({"n": 3, "title": "WHAT TO WATCH", "html": w, "hot": False})
 
     # MAP POINTS TO play card (the recommended option display).
     play = None
