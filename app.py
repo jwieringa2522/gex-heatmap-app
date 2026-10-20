@@ -293,6 +293,11 @@ APP_PAGE = """<!DOCTYPE html>
   .step p { font-size:14px; line-height:1.7; color:#bbb; margin:0; }
   .step p b { color:#fff; }
   .step p b.r { color:#f87171; } .step p b.g { color:#4ade80; } .step p b.y { color:#facc15; }
+  .step ul { list-style:none; margin:10px 0 0; padding:0; }
+  .step li { position:relative; font-size:14px; line-height:1.55; color:#bbb; padding:5px 0 5px 20px; }
+  .step li:before { content:"\2022"; position:absolute; left:2px; top:5px; color:#30857a; font-weight:800; font-size:16px; }
+  .step li b { color:#fff; }
+  .step li b.r { color:#f87171; } .step li b.g { color:#4ade80; } .step li b.y { color:#facc15; }
   .play { display:none; background:linear-gradient(180deg,#10151c,#0b0e13); border:1px solid #facc15; border-radius:16px; padding:26px 28px; margin:26px auto 0; max-width:1100px; text-align:left; }
   .play .kicker { color:#facc15; font-size:12px; font-weight:800; letter-spacing:3px; margin-bottom:10px; }
   .play .big { font-size:30px; font-weight:800; margin-bottom:10px; }
@@ -353,7 +358,11 @@ f.addEventListener('submit', async e=>{
     v.innerHTML='<span class="lv">'+esc(vd.headline||'')+'</span> - '+esc(vd.clause||'');
     v.style.display='block';
     img.src='/i/'+encodeURIComponent(ticker)+'.png?ts='+Date.now();
-    steps.innerHTML=(ex.cards||[]).map(c=>'<div class="step'+(c.hot?' hot':'')+'"><div class="num">'+c.n+'</div><h4>'+esc(c.title)+'</h4><p>'+c.html+'</p></div>').join('');
+    steps.innerHTML=(ex.cards||[]).map(c=>{
+      const pts=(c.points||[]).map(p=>'<li>'+p+'</li>').join('');
+      const body=pts?'<ul>'+pts+'</ul>':(c.html?'<p>'+c.html+'</p>':'');
+      return '<div class="step'+(c.hot?' hot':'')+'"><div class="num">'+c.n+'</div><h4>'+esc(c.title)+'</h4>'+body+'</div>';
+    }).join('');
     steps.style.display='grid';
     const pl=ex.play;
     if(pl){

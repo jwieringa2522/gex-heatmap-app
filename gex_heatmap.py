@@ -322,54 +322,64 @@ def page_extras(d):
     ]
 
     cards = []
-    # 1. Find the walls.
+    # 1. Find the walls (bullet points).
     if pw_s is not None and cw_s is not None:
         pw_a, cw_a = abs(pw_v), abs(cw_v)
         if pw_a >= cw_a:
             heavy, ratio = "put", pw_a / cw_a if cw_a else 99
         else:
             heavy, ratio = "call", cw_a / pw_a if pw_a else 99
-        html = (f"Big money clusters at two strikes: the "
-                f"<b class=\"r\">${pw_s:g} put wall</b> ({_fmt_cell(pw_v)}) "
-                f"below and the <b class=\"g\">${cw_s:g} call wall</b> "
-                f"({_fmt_cell(cw_v)}) above. The {heavy} wall is about "
-                f"{int(round(ratio))}x heavier - that is the magnet.")
+        points = [
+            f"Put wall <b class=\"r\">${pw_s:g}</b> ({_fmt_cell(pw_v)}) "
+            f"sits below the price",
+            f"Call wall <b class=\"g\">${cw_s:g}</b> ({_fmt_cell(cw_v)}) "
+            f"sits above the price",
+            f"The {heavy} wall is about {int(round(ratio))}x heavier - "
+            f"that is the magnet",
+        ]
     elif pw_s is not None:
-        html = (f"Big money clusters below: the "
-                f"<b class=\"r\">${pw_s:g} put wall</b> ({_fmt_cell(pw_v)}). "
-                f"No real call wall above - the magnet points down.")
+        points = [
+            f"Put wall <b class=\"r\">${pw_s:g}</b> ({_fmt_cell(pw_v)}) "
+            f"sits below the price",
+            "No real call wall above - the magnet points down",
+        ]
     elif cw_s is not None:
-        html = (f"Big money clusters above: the "
-                f"<b class=\"g\">${cw_s:g} call wall</b> ({_fmt_cell(cw_v)}). "
-                f"No real put wall below - the magnet points up.")
+        points = [
+            f"Call wall <b class=\"g\">${cw_s:g}</b> ({_fmt_cell(cw_v)}) "
+            f"sits above the price",
+            "No real put wall below - the magnet points up",
+        ]
     else:
-        html = "No clear gamma walls on this chain - positioning is scattered."
-    cards.append({"n": 1, "title": "FIND THE WALLS", "html": html,
+        points = ["No clear gamma walls on this chain - positioning is "
+                  "scattered."]
+    cards.append({"n": 1, "title": "FIND THE WALLS", "points": points,
                   "hot": False})
 
     # 2. See where price sits.
     if pw_s is not None and cw_s is not None:
         if spot <= pw_s * 1.03:
-            pos = f"pressing the <b class=\"r\">${pw_s:g} put wall</b>"
+            pos_pt = f"Pressing the <b class=\"r\">${pw_s:g} put wall</b>"
         elif spot >= cw_s * 0.97:
-            pos = f"pressing the <b class=\"g\">${cw_s:g} call wall</b>"
+            pos_pt = f"Pressing the <b class=\"g\">${cw_s:g} call wall</b>"
         else:
             near = "put" if abs(spot - pw_s) < abs(spot - cw_s) else "call"
-            pos = f"between the walls, closer to the {near} wall"
+            pos_pt = f"Between the walls - closer to the {near} wall"
     else:
-        pos = "on the map"
-    regime = ("the put side is winning and swings get bigger" if net < 0
-              else "the call side is winning and price gets choppy" if net > 0
-              else "neither side is in control")
+        pos_pt = "No clear walls to measure against"
+    regime_pt = (f"Net gamma <b>{_fmt_cell(net)}</b> - the put side is "
+                 f"winning, so expect bigger swings" if net < 0 else
+                 f"Net gamma <b>{_fmt_cell(net)}</b> - the call side is "
+                 f"winning, so expect choppy price action" if net > 0 else
+                 f"Net gamma <b>{_fmt_cell(net)}</b> - neither side is in "
+                 f"control")
     cards.append({"n": 2, "title": "SEE WHERE PRICE SITS", "hot": False,
-                  "html": (f"<b>${ticker}</b> trades at <b>${spot:.2f}</b>, "
-                           f"{pos}. Net gamma is <b>{_fmt_cell(net)}</b>, "
-                           f"so {regime}.")})
+                  "points": [f"<b>${ticker}</b> trades at <b>${spot:.2f}</b>",
+                             pos_pt, regime_pt]})
 
     # 3. What to watch: expiry concentration. When one expiry holds most of
     # the map's gamma, beginners misread the verdict as lasting for weeks -
     # call it out with the losing side's wall for context.
-    w = None
+    pts = []
     cols = d.get("col_totals") or []
     if cols and net != 0 and lean != "NEUTRAL":
         tot_abs = sum(abs(c) for c in cols)
@@ -380,9 +390,9 @@ def page_extras(d):
             color_word = "green" if net > 0 else "red"
             wall_s = pw_s if lean == "BULLISH" else cw_s
             wall_name = "put wall" if lean == "BULLISH" else "call wall"
-            w = (f"Most of the {color_word} on this map expires soon - the "
-                 f"{be['label']} expiry ({be['dte']} days out) holds about "
-                 f"{share:.0%} of all gamma.")
+            pts.append(f"Most of the {color_word} on this map expires soon "
+                       f"- the {be['label']} expiry ({be['dte']} days out) "
+                       f"holds about {share:.0%} of all gamma")
             if wall_s is not None:
                 wi = min(range(len(d["strikes"])),
                          key=lambda i: abs(d["strikes"][i] - wall_s))
@@ -390,23 +400,25 @@ def page_extras(d):
                 wj = max(range(len(wrow)), key=lambda j: abs(wrow[j]))
                 we = d["expiries"][wj]
                 if we["label"] != be["label"]:
-                    when = "longer-dated" if we["dte"] > be["dte"] else "other"
-                    w += (f" The ${wall_s:g} {wall_name} is built on "
-                          f"{when} options, heaviest in {we['label']}.")
-    if w is None:
+                    when = ("longer-dated" if we["dte"] > be["dte"]
+                            else "other")
+                    pts.append(f"The ${wall_s:g} {wall_name} is built on "
+                               f"{when} options, heaviest in {we['label']}")
+    if not pts:
         # generic fallback: walls move over time (unique beginner insight -
         # the banner owns the verdict, card 1 owns the magnet, card 2 owns
         # the price position, the play card owns the trade).
-        w = ("Walls are not permanent - they are built from open options "
-             "and shift as expiry dates pass. The heaviest action right "
-             "now sits in the expiry named in the tile above.")
+        pts = ["Walls are not permanent - they shift as expiry dates pass",
+               "Heaviest action right now: the expiry named in the tile "
+               "above"]
     if lean == "NEUTRAL":
-        w += (" No single strike stands out today, so there is no MAP "
-              "POINTS TO card.")
+        pts.append("No single strike stands out today, so there is no MAP "
+                   "POINTS TO card")
     else:
-        w += (" The MAP POINTS TO card below names the exact strike and "
-              "date.")
-    cards.append({"n": 3, "title": "WHAT TO WATCH", "html": w, "hot": False})
+        pts.append("The MAP POINTS TO card below names the exact strike and "
+                   "date")
+    cards.append({"n": 3, "title": "WHAT TO WATCH", "points": pts,
+                  "hot": False})
 
     # MAP POINTS TO play card (the recommended option display).
     play = None
