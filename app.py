@@ -277,6 +277,7 @@ APP_PAGE = """<!DOCTYPE html>
   #verdict.neutral .lv { color:#cbd5e1; }
   .bleed { width:100vw; margin-left:calc(50% - 50vw); }
   .bleed img { width:100%; display:block; border-top:1px solid #222; border-bottom:1px solid #222; }
+  @media (min-width:1400px){ .bleed img { width:88%; margin-left:auto; margin-right:auto; } }
   #tiles { display:none; grid-template-columns:repeat(3,1fr); gap:8px; margin:0 auto 18px; max-width:1100px; padding:0 16px; }
   .tile { background:#0b0e13; border:1px solid #1c232e; border-radius:10px; padding:10px 6px; }
   .tile .k { font-size:10px; letter-spacing:2px; color:#777; }
