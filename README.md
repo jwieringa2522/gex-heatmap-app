@@ -1,4 +1,4 @@
-# SPY BEFORE YOU BUY - Free GEX Heatmap App
+# SPY BEFORE YOU BUY - GEX Heatmap App
 
 Type a ticker, get the strike x expiry GEX heatmap + point-form read.
 Brand: black / white / teal `#30857a`.

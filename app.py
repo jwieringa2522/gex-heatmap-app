@@ -226,7 +226,7 @@ def get_or_build(ticker: str, user: dict):
 LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SPY BEFORE YOU BUY - Free GEX Heatmap</title>
+<title>SPY BEFORE YOU BUY - GEX Heatmap</title>
 <style>
   body { background:#000; color:#fff; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; margin:0; padding:24px 16px 48px; }
   .wrap { max-width:920px; margin:0 auto; text-align:center; }
@@ -251,7 +251,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
 APP_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SPY BEFORE YOU BUY - Free GEX Heatmap</title>
+<title>SPY BEFORE YOU BUY - GEX Heatmap</title>
 <style>
   * { box-sizing: border-box; }
   body { background:#000; color:#fff; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; margin:0; padding:24px 16px 48px; overflow-x:hidden; }
