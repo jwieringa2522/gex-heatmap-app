@@ -403,6 +403,132 @@ def login_page() -> str:
     return LOGIN_PAGE.replace("__WIDGET__", widget)
 
 
+# ---------- subscriber disclaimer gate ----------
+# The link Justin DMs a new X subscriber is /agree/<invite-code>. The page
+# shows the full terms; clicking agree logs (code, time, IP, user agent) in
+# usage.db and redirects to the one-time Telegram invite https://t.me/+<code>.
+DISC_PATH = os.path.join(APP_DIR, "disclaimer.md")
+CODE_RE = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
+
+
+def _md_to_html(md: str) -> str:
+    import html as _html
+    out, para, lst = [], [], None  # lst: current <li> buffer or None
+
+    def flush_para():
+        if para:
+            out.append(f"<p>{_html.escape(' '.join(para))}</p>")
+            para.clear()
+
+    def flush_li():
+        nonlocal lst
+        if lst is not None:
+            out.append(f"<li>{_html.escape(' '.join(lst))}</li>")
+            lst = None
+
+    in_list = False
+    for raw in md.splitlines():
+        line = raw.rstrip()
+        s = line.strip()
+        if s.startswith("## "):
+            flush_para(); flush_li()
+            if in_list: out.append("</ul>"); in_list = False
+            out.append(f"<h2>{_html.escape(s[3:])}</h2>")
+        elif s.startswith("# "):
+            flush_para(); flush_li()
+            if in_list: out.append("</ul>"); in_list = False
+            out.append(f"<h1>{_html.escape(s[2:])}</h1>")
+        elif s == "---":
+            flush_para(); flush_li()
+            if in_list: out.append("</ul>"); in_list = False
+            out.append("<hr>")
+        elif s.startswith("- "):
+            flush_para(); flush_li()
+            if not in_list: out.append("<ul>"); in_list = True
+            lst = [s[2:]]
+        elif not s:
+            flush_para(); flush_li()
+            if in_list: out.append("</ul>"); in_list = False
+        elif line[:1] in (" ", "\t") and lst is not None:
+            lst.append(s)
+        elif s.startswith("**") and s.endswith("**"):
+            flush_para(); flush_li()
+            if in_list: out.append("</ul>"); in_list = False
+            out.append(f"<p class='ver'>{_html.escape(s.strip('*'))}</p>")
+        else:
+            if in_list and lst is not None and line[:1] in (" ", "\t"):
+                lst.append(s)
+            else:
+                flush_li()
+                if in_list: out.append("</ul>"); in_list = False
+                para.append(s)
+    flush_para(); flush_li()
+    if in_list: out.append("</ul>")
+    return "\n".join(out)
+
+
+AGREE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spy Before You Buy - Terms and Conditions</title>
+<style>
+body{background:#000;color:#e8ecf1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;padding:24px 16px 140px;}
+.wrap{max-width:760px;margin:0 auto;}
+.brand{color:#30857a;font-weight:800;letter-spacing:2px;font-size:13px;text-align:center;margin-bottom:4px;}
+.tagline{color:#8b94a3;font-size:11px;letter-spacing:3px;text-align:center;margin-bottom:28px;}
+h1{font-size:22px;line-height:1.3;}
+h2{font-size:16px;margin-top:28px;color:#fff;}
+p,li{font-size:14px;line-height:1.65;color:#c9d1d9;}
+.ver{color:#8b94a3;font-size:12px;}
+hr{border:none;border-top:1px solid #222;margin:24px 0;}
+.bar{position:fixed;left:0;right:0;bottom:0;background:#0b0e13;border-top:1px solid #1c232e;padding:14px 16px;text-align:center;}
+button{background:#30857a;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:700;padding:14px 22px;width:100%;max-width:760px;cursor:pointer;}
+.nope{color:#8b94a3;font-size:12px;margin-top:10px;}
+</style></head><body><div class="wrap">
+<div class="brand">SPY BEFORE YOU BUY</div>
+<div class="tagline">WAIT. CONFIRM. EXECUTE.</div>
+__BODY__
+</div>
+<div class="bar">
+<form method="post" action="/agree/__CODE__/accept">
+<button type="submit">Yes, I fully understand and agree</button>
+</form>
+<div class="nope">If you do not agree, close this page and do not enter the channel.</div>
+</div>
+</body></html>
+"""
+
+
+@app.get("/agree/{code}", response_class=HTMLResponse)
+def agree_page(code: str):
+    if not CODE_RE.match(code):
+        return HTMLResponse("Invalid link.", status_code=404)
+    try:
+        with open(DISC_PATH) as f:
+            body = _md_to_html(f.read())
+    except OSError:
+        return HTMLResponse("Terms unavailable - contact the owner.", status_code=500)
+    return AGREE_PAGE.replace("__BODY__", body).replace("__CODE__", code)
+
+
+@app.post("/agree/{code}/accept")
+def agree_accept(code: str, request: Request):
+    if not CODE_RE.match(code):
+        return JSONResponse({"detail": "bad link"}, status_code=404)
+    ip = (request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+          or (request.client.host if request.client else ""))
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS agreements
+                       (code TEXT, ts REAL, ip TEXT, ua TEXT)""")
+        con.execute(
+            "INSERT INTO agreements (code, ts, ip, ua) VALUES (?,?,?,?)",
+            (code, time.time(), ip, request.headers.get("user-agent", "")[:300]))
+        con.commit()
+    finally:
+        con.close()
+    return RedirectResponse(f"https://t.me/+{code}", status_code=302)
+
+
 # ---------- routes ----------
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
