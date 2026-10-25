@@ -1,6 +1,6 @@
 # SPY BEFORE YOU BUY - TERMS AND CONDITIONS OF ACCESS
 
-**Version 1 - October 22, 2026.**
+**Version 2 - October 24, 2026.**
 
 These Terms and Conditions govern your access to the private Spy Before You
 Buy Telegram channel. Access is conditional on your acceptance of every term
@@ -122,28 +122,27 @@ opinion and is not endorsed by the Operator. The Operator is not responsible
 for third-party content, links, tools, brokers, or platforms referenced in
 the channel, and your use of them is at your own risk.
 
-## 12. TRADING DISCLOSURE
+## 12. DISCLOSURE
 
 Some content shared in this channel - including trade alerts, position
 updates, entries, exits, and performance figures - may reflect model, test,
-or illustrative activity rather than transactions executed with real
-capital. Such activity may be produced using virtual funds in testing
-environments, in which no real capital is at risk and no orders are placed
-in the market.
+or illustrative activity rather than executed transactions. Such activity
+may be produced in testing environments, and no orders are placed in the
+market for it.
 
 Accordingly:
 
 - Prices, fills, speeds, and sizes associated with such activity can differ
-  significantly from what a live account would experience, and do not bear
-  real commissions, spreads, slippage, or the psychological pressure of real
-  losses.
+  significantly from actual market execution, and do not include
+  commissions, spreads, slippage, or the psychological pressure that comes
+  with trading.
 - Any results associated with such activity, whether profitable or not, are
   hypothetical in nature. They are not a track record of executed trading,
   and are not an indication of what you or anyone else would earn or lose
-  trading with real capital.
-- The Operator may or may not undertake the same activity with real capital,
-  may do so at different prices or sizes, or may not do so at all, and is
-  under no obligation to identify which content falls into which category.
+  trading.
+- The Operator may or may not undertake the same activity, may do so at
+  different prices or sizes, or may not do so at all, and is under no
+  obligation to identify which content falls into which category.
 
 If this matters to you, do not subscribe, and if you are already subscribed,
 cancel.
@@ -161,8 +160,8 @@ discharge the Operator from any and all claims, demands, and causes of
 action, known or unknown, connected in any way to your subscription or to any
 trading decision you made after viewing the Content. If any part of this
 limitation is found unenforceable in your jurisdiction, the Operator's total
-liability is limited to the subscription fees you paid in the single month
-preceding your claim.
+liability is limited to the amount you paid for your subscription in the
+single month preceding your claim.
 
 ## 14. INDEMNIFICATION
 
@@ -171,11 +170,13 @@ losses, liabilities, damages, costs, and legal fees brought by you or any
 third party arising out of your use of the Content, your trading activity,
 or your breach of these terms.
 
-## 15. SUBSCRIPTION FEES
+## 15. SUBSCRIPTIONS
 
-Subscription fees are charged through X (Twitter) under X's own terms and
-refund policies. Access to this channel is a courtesy benefit of an active X
-subscription and may be modified, interrupted, or discontinued at any time.
+Subscriptions are purchased through X (Twitter) or through the Spy Before
+You Buy website, under the terms and refund policies of whichever platform
+you purchased through. Access to this channel is a courtesy benefit of an
+active subscription and may be modified, interrupted, or discontinued at any
+time.
 Removal from this channel for violating channel rules, chargebacks, abuse,
 or redistribution of Content is at the Operator's sole discretion. Sharing,
 reselling, screenshotting for distribution, or otherwise redistributing the
@@ -206,8 +207,8 @@ Canada, and you consent to that jurisdiction.
 By clicking "Yes, I fully understand and agree," you acknowledge that: you
 have read this entire document; you understand that trading can and does
 cause real financial loss; you understand that some content may reflect
-model, test, or illustrative activity rather than transactions executed
-with real capital; you understand that
+model, test, or illustrative activity rather than executed transactions;
+you understand that
 nothing here is financial advice; and you accept full responsibility for
 your own decisions. If you do not agree with any part of this document, do
 not click agree and do not enter the channel.
