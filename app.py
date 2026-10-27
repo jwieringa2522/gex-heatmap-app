@@ -350,7 +350,7 @@ f.addEventListener('submit', async e=>{
   if(!ticker) return;
   err.style.display='none'; res.style.display='none';
   b.disabled=true;
-  const STEPS=['Fetching option chain...','Crunching gamma...','Rendering heatmap...'];
+  const STEPS=['Fetching option chain...','Crunching gamma...','Loading heatmap...'];
   let si=0; b.textContent=STEPS[0];
   const stepTimer=setInterval(()=>{ si=(si+1)%STEPS.length; b.textContent=STEPS[si]; },1400);
   try{
