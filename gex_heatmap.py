@@ -76,6 +76,18 @@ def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
     totals_all = {s: sum(per_exp[ed].get(s, 0.0) for ed in expiries)
                   for s in in_band}
 
+    # The walls: the biggest positive / negative per-strike piles
+    # anywhere in the band. Computed here so the wall strikes can be
+    # force-included in the displayed strikes below - the standout
+    # cells live inside the wall rows, so the walls must always be
+    # on the map.
+    call_wall = max(((s, totals_all[s]) for s in in_band
+                     if totals_all[s] > 0),
+                    key=lambda x: x[1], default=(None, 0.0))
+    put_wall = min(((s, totals_all[s]) for s in in_band
+                    if totals_all[s] < 0),
+                   key=lambda x: x[1], default=(None, 0.0))
+
     # The "interesting" strikes: heaviest above spot (bullish, blue) and
     # heaviest below spot (bearish, yellow).
     above = [s for s in in_band if s > spot]
@@ -89,7 +101,7 @@ def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
     spot_s = min(in_band, key=lambda s: abs(s - spot))
     ranked = sorted(in_band, key=lambda s: abs(totals_all[s]), reverse=True)
     picked = [spot_s] + [s for s in ranked if s != spot_s][:max_rows - 1]
-    for s in (bull_strike, bear_strike):
+    for s in (bull_strike, bear_strike, call_wall[0], put_wall[0]):
         if s is not None and s not in picked:
             picked.append(s)
     strikes = sorted(picked, reverse=True)
@@ -105,11 +117,6 @@ def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
                 tot_call += v
             else:
                 tot_put += v
-    call_wall = max(((s, totals_all[s]) for s in in_band if totals_all[s] > 0),
-                    key=lambda x: x[1], default=(None, 0.0))
-    put_wall = min(((s, totals_all[s]) for s in in_band if totals_all[s] < 0),
-                   key=lambda x: x[1], default=(None, 0.0))
-
     # biggest single strike x expiry concentration
     big = (None, None, 0.0)
     for ed in expiries:
@@ -558,17 +565,18 @@ def render_html(d):
               else f"rgba(239,68,68,{inten:.2f})")
         return f"background:{bg};color:#f2f5f9;"
 
-    # The single standout cell per level: biggest expiry concentration in the
-    # bullish strike's row (blue) and in the bearish strike's row (yellow).
+    # The single standout cell per wall: biggest expiry concentration
+    # inside the CALL WALL row (blue) and inside the PUT WALL row
+    # (yellow), so the standout always lines up with its wall tag.
     blue_ij = yellow_ij = None
     blue_exp = bear_exp = ""
-    if bull is not None and bull in strikes:
-        bi = strikes.index(bull)
+    if cw[0] is not None and cw[0] in strikes:
+        bi = strikes.index(cw[0])
         bj = max(range(len(expiries)), key=lambda j: matrix[bi][j])
         blue_ij = (bi, bj)
         blue_exp = expiries[bj]["label"]
-    if bear is not None and bear in strikes:
-        bi = strikes.index(bear)
+    if pw[0] is not None and pw[0] in strikes:
+        bi = strikes.index(pw[0])
         bj = min(range(len(expiries)), key=lambda j: matrix[bi][j])
         yellow_ij = (bi, bj)
         bear_exp = expiries[bj]["label"]

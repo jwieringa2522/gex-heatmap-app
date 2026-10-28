@@ -38,7 +38,6 @@ def render(d, png_path):
     ticker, spot = d["ticker"], d["spot"]
     strikes, expiries = d["strikes"], d["expiries"]
     matrix = d["matrix"]
-    bull, bear = d["bull_strike"], d["bear_strike"]
     cw, pw = d["call_wall"], d["put_wall"]
 
     n_rows = len(strikes) + 2          # header + strikes + total
@@ -50,13 +49,15 @@ def render(d, png_path):
                                          # exceed any single cell (SPY did)
     spot_i = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot))
 
-    # standout cells: biggest expiry concentration in bull/bear rows
+    # standout cells: biggest expiry concentration inside each WALL
+    # row, so the blue cell always sits in the CALL WALL row and the
+    # yellow cell always sits in the PUT WALL row, on every ticker.
     blue_ij = yellow_ij = None
-    if bull is not None and bull in strikes:
-        bi = strikes.index(bull)
+    if cw[0] is not None and cw[0] in strikes:
+        bi = strikes.index(cw[0])
         blue_ij = (bi, max(range(len(expiries)), key=lambda j: matrix[bi][j]))
-    if bear is not None and bear in strikes:
-        bi = strikes.index(bear)
+    if pw[0] is not None and pw[0] in strikes:
+        bi = strikes.index(pw[0])
         yellow_ij = (bi, min(range(len(expiries)), key=lambda j: matrix[bi][j]))
 
     fig = plt.figure(figsize=(12.8, 7.2), dpi=200)
