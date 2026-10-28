@@ -352,13 +352,19 @@ def page_extras(d):
             heavy, ratio = "put", pw_a / cw_a if cw_a else 99
         else:
             heavy, ratio = "call", cw_a / pw_a if pw_a else 99
+        if ratio < 1.5:
+            magnet_pt = ("The two walls are about even - neither one "
+                         "is a real magnet")
+        else:
+            magnet_pt = (f"The {heavy} wall is about "
+                         f"{int(round(ratio))}x heavier - that is "
+                         f"the magnet")
         points = [
             f"Put wall <b class=\"r\">${pw_s:g}</b> ({_fmt_cell(pw_v)}) "
             f"{_wall_txt('put', pw_s)}",
             f"Call wall <b class=\"g\">${cw_s:g}</b> ({_fmt_cell(cw_v)}) "
             f"{_wall_txt('call', cw_s)}",
-            f"The {heavy} wall is about {int(round(ratio))}x heavier - "
-            f"that is the magnet",
+            magnet_pt,
         ]
     elif pw_s is not None:
         points = [
