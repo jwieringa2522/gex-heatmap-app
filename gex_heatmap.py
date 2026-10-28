@@ -322,6 +322,29 @@ def page_extras(d):
     ]
 
     cards = []
+
+    def _wall_txt(kind, strike):
+        # Where a wall really sits vs spot - measured, never assumed. A
+        # put wall above price is overhead (caps rallies more than it
+        # floors drops); a call wall below price is underneath (props
+        # price up more than it caps it). The piles stay where the data
+        # puts them; the words have to match the position.
+        if strike < spot * 0.995:
+            rel = "below"
+        elif strike > spot * 1.005:
+            rel = "above"
+        else:
+            rel = "at"
+        if kind == "put":
+            return {"below": "sits below the price",
+                    "above": ("sits above the price - overhead, so it "
+                              "caps rallies more than it floors drops"),
+                    "at": "sits right at the price"}[rel]
+        return {"above": "sits above the price",
+                "below": ("sits below the price - underneath, so it "
+                          "props price up more than it caps it"),
+                "at": "sits right at the price"}[rel]
+
     # 1. Find the walls (bullet points).
     if pw_s is not None and cw_s is not None:
         pw_a, cw_a = abs(pw_v), abs(cw_v)
@@ -331,23 +354,25 @@ def page_extras(d):
             heavy, ratio = "call", cw_a / pw_a if pw_a else 99
         points = [
             f"Put wall <b class=\"r\">${pw_s:g}</b> ({_fmt_cell(pw_v)}) "
-            f"sits below the price",
+            f"{_wall_txt('put', pw_s)}",
             f"Call wall <b class=\"g\">${cw_s:g}</b> ({_fmt_cell(cw_v)}) "
-            f"sits above the price",
+            f"{_wall_txt('call', cw_s)}",
             f"The {heavy} wall is about {int(round(ratio))}x heavier - "
             f"that is the magnet",
         ]
     elif pw_s is not None:
         points = [
             f"Put wall <b class=\"r\">${pw_s:g}</b> ({_fmt_cell(pw_v)}) "
-            f"sits below the price",
-            "No real call wall above - the magnet points down",
+            f"{_wall_txt('put', pw_s)}",
+            "No real call wall on this chain - the put side is the "
+            "only magnet",
         ]
     elif cw_s is not None:
         points = [
             f"Call wall <b class=\"g\">${cw_s:g}</b> ({_fmt_cell(cw_v)}) "
-            f"sits above the price",
-            "No real put wall below - the magnet points up",
+            f"{_wall_txt('call', cw_s)}",
+            "No real put wall on this chain - the call side is the "
+            "only magnet",
         ]
     else:
         points = ["No clear gamma walls on this chain - positioning is "
@@ -355,17 +380,44 @@ def page_extras(d):
     cards.append({"n": 1, "title": "FIND THE WALLS", "points": points,
                   "hot": False})
 
-    # 2. See where price sits.
-    if pw_s is not None and cw_s is not None:
-        if spot <= pw_s * 1.03:
-            pos_pt = f"Pressing the <b class=\"r\">${pw_s:g} put wall</b>"
-        elif spot >= cw_s * 0.97:
-            pos_pt = f"Pressing the <b class=\"g\">${cw_s:g} call wall</b>"
-        else:
-            near = "put" if abs(spot - pw_s) < abs(spot - cw_s) else "call"
-            pos_pt = f"Between the walls - closer to the {near} wall"
-    else:
+    # 2. See where price sits. Position is measured, never assumed: the
+    # nearest wall, which side of price it is on, and how far away it is.
+    # (The old text called any price within 3% under a put wall
+    # "pressing" it - wrong side entirely.)
+    wall_list = [(k, s) for k, s in (("put", pw_s), ("call", cw_s))
+                 if s is not None]
+    if not wall_list:
         pos_pt = "No clear walls to measure against"
+    else:
+        wname, ws = min(wall_list, key=lambda w: abs(w[1] - spot))
+        wcls = "r" if wname == "put" else "g"
+        dist = abs(ws - spot)
+        if dist <= spot * 0.005:
+            pos_pt = (f"Sitting right on the <b class=\"{wcls}\">"
+                      f"${ws:g} {wname} wall</b>")
+        elif dist <= spot * 0.03 and wname == "put" and ws < spot:
+            pos_pt = f"Pressing the <b class=\"r\">${ws:g} put wall</b>"
+        elif dist <= spot * 0.03 and wname == "put":
+            pos_pt = (f"Just under the <b class=\"r\">${ws:g} put "
+                      f"wall</b> - it sits overhead, capping rallies")
+        elif dist <= spot * 0.03 and wname == "call" and ws > spot:
+            pos_pt = f"Pressing the <b class=\"g\">${ws:g} call wall</b>"
+        elif dist <= spot * 0.03:
+            pos_pt = (f"Just over the <b class=\"g\">${ws:g} call "
+                      f"wall</b> - it sits underneath, propping price up")
+        elif (pw_s is not None and cw_s is not None
+              and pw_s < spot < cw_s):
+            pos_pt = f"Between the walls - closer to the {wname} wall"
+        elif (pw_s is not None and cw_s is not None
+              and spot < min(pw_s, cw_s)):
+            pos_pt = "Below both walls - every big pile sits overhead"
+        elif (pw_s is not None and cw_s is not None
+              and spot > max(pw_s, cw_s)):
+            pos_pt = "Above both walls - every big pile sits underneath"
+        else:
+            side = "overhead" if ws > spot else "underneath"
+            pos_pt = (f"Nearest level is the <b class=\"{wcls}\">"
+                      f"${ws:g} {wname} wall</b>, {side}")
     regime_pt = (f"Net gamma <b>{_fmt_cell(net)}</b> - the put side is "
                  f"winning, so expect bigger swings" if net < 0 else
                  f"Net gamma <b>{_fmt_cell(net)}</b> - the call side is "
@@ -390,9 +442,15 @@ def page_extras(d):
             color_word = "green" if net > 0 else "red"
             wall_s = pw_s if lean == "BULLISH" else cw_s
             wall_name = "put wall" if lean == "BULLISH" else "call wall"
-            pts.append(f"Most of the {color_word} on this map expires soon "
-                       f"- the {be['label']} expiry ({be['dte']} days out) "
-                       f"holds about {share:.0%} of all gamma")
+            if be["dte"] <= 21:
+                lead = (f"Most of the {color_word} on this map "
+                        f"expires soon ")
+            else:
+                lead = (f"Most of the {color_word} on this map sits "
+                        f"in one expiry ")
+            pts.append(f"{lead}- the {be['label']} expiry "
+                       f"({be['dte']} days out) holds about "
+                       f"{share:.0%} of all gamma")
             if wall_s is not None:
                 wi = min(range(len(d["strikes"])),
                          key=lambda i: abs(d["strikes"][i] - wall_s))
