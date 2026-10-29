@@ -611,7 +611,7 @@ MANIFEST = {
 SW_JS = """// Installable-app service worker. Network for everything except the
 // icons, which are cache-first. Pages, logins and heatmaps are never
 // cached, so membership checks stay live.
-var CACHE = 'sbyb-icons-v1';
+var CACHE = 'sbyb-icons-v2';
 var ICONS = ['/icons/icon-192.png', '/icons/icon-512.png',
              '/icons/icon-maskable-512.png', '/icons/apple-touch-icon.png'];
 self.addEventListener('install', function(e) {
