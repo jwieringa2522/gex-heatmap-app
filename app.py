@@ -245,25 +245,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
   .card p { color:#aaa; font-size:15px; line-height:1.6; }
   .foot { color:#555; font-size:12px; margin-top:36px; }
   .foot a { color:#30857a; text-decoration:none; }
-</style></head><body>
-  <div id="splash" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;align-items:center;justify-content:center;opacity:1;transition:opacity .3s ease;">
-    <img src="/icons/icon-512.png" alt="GEX Heatmap" style="width:min(60vw,262px);height:auto;">
-  </div>
-  <script>
-    (function(){
-      try {
-        var standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
-        if (!standalone || sessionStorage.getItem('sbybSplashShown')) return;
-        sessionStorage.setItem('sbybSplashShown', '1');
-        var sp = document.getElementById('splash');
-        sp.style.display = 'flex';
-        var hide = function(){ sp.style.opacity = '0'; setTimeout(function(){ sp.style.display = 'none'; }, 320); };
-        sp.addEventListener('click', hide);
-        setTimeout(hide, 2000);
-      } catch (e) {}
-    })();
-  </script>
-<div class="wrap">
+</style></head><body><div class="wrap">
   <h1>SPY BEFORE YOU BUY</h1>
   <div class="tag">WAIT. CONFIRM. EXECUTE.</div>
   <div class="card">
@@ -350,25 +332,7 @@ APP_PAGE = """<!DOCTYPE html>
   .fine { color:#999; font-size:13px; line-height:1.6; margin:26px auto 0; max-width:1100px; text-align:center; padding:16px 16px 0; border-top:1px solid #1c232e; }
   .foot { color:#555; font-size:12px; margin-top:36px; }
   .foot a { color:#30857a; text-decoration:none; }
-</style></head><body>
-  <div id="splash" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;align-items:center;justify-content:center;opacity:1;transition:opacity .3s ease;">
-    <img src="/icons/icon-512.png" alt="GEX Heatmap" style="width:min(60vw,262px);height:auto;">
-  </div>
-  <script>
-    (function(){
-      try {
-        var standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
-        if (!standalone || sessionStorage.getItem('sbybSplashShown')) return;
-        sessionStorage.setItem('sbybSplashShown', '1');
-        var sp = document.getElementById('splash');
-        sp.style.display = 'flex';
-        var hide = function(){ sp.style.opacity = '0'; setTimeout(function(){ sp.style.display = 'none'; }, 320); };
-        sp.addEventListener('click', hide);
-        setTimeout(hide, 2000);
-      } catch (e) {}
-    })();
-  </script>
-<div class="wrap">
+</style></head><body><div class="wrap">
   <h1>SPY BEFORE YOU BUY</h1>
   <div class="tag">WAIT. CONFIRM. EXECUTE.</div>
   <div class="who">Logged in as <b>__NAME__</b> &middot; <a href="/api/logout">log out</a></div>
