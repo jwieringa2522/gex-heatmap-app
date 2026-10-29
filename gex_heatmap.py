@@ -330,29 +330,16 @@ def page_extras(d):
 
     cards = []
 
-    def _wall_txt(kind, strike):
-        # Where a wall really sits vs spot - measured, never assumed. A
-        # put wall above price is overhead (caps rallies more than it
-        # floors drops); a call wall below price is underneath (props
-        # price up more than it caps it). The piles stay where the data
-        # puts them; the words have to match the position.
-        if strike < spot * 0.995:
-            rel = "below"
-        elif strike > spot * 1.005:
-            rel = "above"
-        else:
-            rel = "at"
-        if kind == "put":
-            return {"below": "sits below the price",
-                    "above": ("sits above the price - overhead, so it "
-                              "caps rallies more than it floors drops"),
-                    "at": "sits right at the price"}[rel]
-        return {"above": "sits above the price",
-                "below": ("sits below the price - underneath, so it "
-                          "props price up more than it caps it"),
-                "at": "sits right at the price"}[rel]
+    # Content ownership (Justin's no-repeat rule, Oct 29): each box owns
+    # its facts and no other box restates them. Tiles own the raw numbers,
+    # the banner owns the lean. Card 1 owns the walls (strike, size, which
+    # is heavier). Card 2 owns price (spot, distance to each wall, room
+    # between them). Card 3 owns what to watch (break / bounce scenarios,
+    # next piles, expiry concentration). The play card owns the pick
+    # (what you are seeing, what would kill it, decay).
 
-    # 1. Find the walls (bullet points).
+    # 1. Find the walls: strike + size + which side is the magnet.
+    # Position words live in card 2 now, not here.
     if pw_s is not None and cw_s is not None:
         pw_a, cw_a = abs(pw_v), abs(cw_v)
         if pw_a >= cw_a:
@@ -367,23 +354,19 @@ def page_extras(d):
                          f"{int(round(ratio))}x heavier - that is "
                          f"the magnet")
         points = [
-            f"Put wall <b class=\"r\">${pw_s:g}</b> ({_fmt_cell(pw_v)}) "
-            f"{_wall_txt('put', pw_s)}",
-            f"Call wall <b class=\"g\">${cw_s:g}</b> ({_fmt_cell(cw_v)}) "
-            f"{_wall_txt('call', cw_s)}",
+            f"Put wall <b class=\"r\">${pw_s:g}</b> ({_fmt_cell(pw_v)})",
+            f"Call wall <b class=\"g\">${cw_s:g}</b> ({_fmt_cell(cw_v)})",
             magnet_pt,
         ]
     elif pw_s is not None:
         points = [
-            f"Put wall <b class=\"r\">${pw_s:g}</b> ({_fmt_cell(pw_v)}) "
-            f"{_wall_txt('put', pw_s)}",
+            f"Put wall <b class=\"r\">${pw_s:g}</b> ({_fmt_cell(pw_v)})",
             "No real call wall on this chain - the put side is the "
             "only magnet",
         ]
     elif cw_s is not None:
         points = [
-            f"Call wall <b class=\"g\">${cw_s:g}</b> ({_fmt_cell(cw_v)}) "
-            f"{_wall_txt('call', cw_s)}",
+            f"Call wall <b class=\"g\">${cw_s:g}</b> ({_fmt_cell(cw_v)})",
             "No real put wall on this chain - the call side is the "
             "only magnet",
         ]
@@ -393,101 +376,121 @@ def page_extras(d):
     cards.append({"n": 1, "title": "FIND THE WALLS", "points": points,
                   "hot": False})
 
-    # 2. See where price sits. Position is measured, never assumed: the
-    # nearest wall, which side of price it is on, and how far away it is.
-    # (The old text called any price within 3% under a put wall
-    # "pressing" it - wrong side entirely.)
-    wall_list = [(k, s) for k, s in (("put", pw_s), ("call", cw_s))
-                 if s is not None]
-    if not wall_list:
-        pos_pt = "No clear walls to measure against"
-    else:
-        wname, ws = min(wall_list, key=lambda w: abs(w[1] - spot))
-        wcls = "r" if wname == "put" else "g"
-        dist = abs(ws - spot)
-        if dist <= spot * 0.005:
-            pos_pt = (f"Sitting right on the <b class=\"{wcls}\">"
-                      f"${ws:g} {wname} wall</b>")
-        elif dist <= spot * 0.03 and wname == "put" and ws < spot:
-            pos_pt = f"Pressing the <b class=\"r\">${ws:g} put wall</b>"
-        elif dist <= spot * 0.03 and wname == "put":
-            pos_pt = (f"Just under the <b class=\"r\">${ws:g} put "
-                      f"wall</b> - it sits overhead, capping rallies")
-        elif dist <= spot * 0.03 and wname == "call" and ws > spot:
-            pos_pt = f"Pressing the <b class=\"g\">${ws:g} call wall</b>"
-        elif dist <= spot * 0.03:
-            pos_pt = (f"Just over the <b class=\"g\">${ws:g} call "
-                      f"wall</b> - it sits underneath, propping price up")
-        elif (pw_s is not None and cw_s is not None
-              and pw_s < spot < cw_s):
-            pos_pt = f"Between the walls - closer to the {wname} wall"
-        elif (pw_s is not None and cw_s is not None
-              and spot < min(pw_s, cw_s)):
-            pos_pt = "Below both walls - every big pile sits overhead"
-        elif (pw_s is not None and cw_s is not None
-              and spot > max(pw_s, cw_s)):
-            pos_pt = "Above both walls - every big pile sits underneath"
+    # 2. See where price sits: spot, the distance to each wall ($ and %),
+    # and the room that leaves. Distances are measured, never assumed -
+    # no other box states them. (The net-gamma regime line that used to
+    # sit here is gone: the tiles own the net number and the banner owns
+    # the lean, so stating it a third way was a repeat.)
+    def _dist_pt(name, strike, cls):
+        dd = abs(strike - spot)
+        pct = dd / spot * 100 if spot else 0
+        if dd <= spot * 0.005:
+            where = "right at the price"
+        elif strike > spot:
+            where = "above the price"
         else:
-            side = "overhead" if ws > spot else "underneath"
-            pos_pt = (f"Nearest level is the <b class=\"{wcls}\">"
-                      f"${ws:g} {wname} wall</b>, {side}")
-    regime_pt = (f"Net gamma <b>{_fmt_cell(net)}</b> - the put side is "
-                 f"winning, so expect bigger swings" if net < 0 else
-                 f"Net gamma <b>{_fmt_cell(net)}</b> - the call side is "
-                 f"winning, so expect choppy price action" if net > 0 else
-                 f"Net gamma <b>{_fmt_cell(net)}</b> - neither side is in "
-                 f"control")
-    cards.append({"n": 2, "title": "SEE WHERE PRICE SITS", "hot": False,
-                  "points": [f"<b>{ticker}</b> trades at <b>${spot:.2f}</b>",
-                             pos_pt, regime_pt]})
+            where = "below the price"
+        pct_txt = f"{pct:.1f}" if pct >= 0.1 else "<0.1"
+        return (f"<b class=\"{cls}\">${strike:g}</b> {name} wall is "
+                f"${dd:,.2f} away ({pct_txt}%) - {where}")
 
-    # 3. What to watch: expiry concentration. When one expiry holds most of
-    # the map's gamma, beginners misread the verdict as lasting for weeks -
-    # call it out with the losing side's wall for context.
+    pts2 = [f"<b>{ticker}</b> trades at <b>${spot:.2f}</b>"]
+    if pw_s is not None:
+        pts2.append(_dist_pt("put", pw_s, "r"))
+    if cw_s is not None:
+        pts2.append(_dist_pt("call", cw_s, "g"))
+    if pw_s is not None and cw_s is not None:
+        lo, hi = min(pw_s, cw_s), max(pw_s, cw_s)
+        width = hi - lo
+        wpct = width / spot * 100 if spot else 0
+        if lo <= spot <= hi:
+            if wpct < 5:
+                room = (f"The walls are only ${width:,.2f} apart "
+                        f"({wpct:.1f}%) with price between them - "
+                        f"boxed in tight")
+            else:
+                room = (f"That leaves ${width:,.2f} of room between "
+                        f"the walls ({wpct:.1f}%) - price is not "
+                        f"boxed in")
+        elif spot < lo:
+            room = ("Price sits under both walls - every big pile is "
+                    "overhead, nothing underneath it")
+        else:
+            room = ("Price sits over both walls - every big pile is "
+                    "underneath it, nothing overhead")
+        pts2.append(room)
+    elif pw_s is not None or cw_s is not None:
+        pts2.append("Open space on the other side - no wall over "
+                    "there at all")
+    else:
+        pts2.append("No clear walls to measure against")
+    cards.append({"n": 2, "title": "SEE WHERE PRICE SITS", "hot": False,
+                  "points": pts2})
+
+    # 3. What to watch: scenarios, not pointers. What a break or a bounce
+    # at each wall would mean, the next big pile past it, and whether one
+    # expiry drives the whole read. (The old filler lines - "the expiry
+    # named in the tile above", "the card below names the strike" -
+    # repeated other boxes and said nothing; they are gone.)
+    def _next_pile(strike, up):
+        cand = [(s, t) for s, t in zip(d["strikes"], d["totals"])
+                if (s > strike if up else s < strike)]
+        if not cand:
+            return None
+        return max(cand, key=lambda p: abs(p[1]))[0]
+
     pts = []
+    walls = [(k, s) for k, s in (("put", pw_s), ("call", cw_s))
+             if s is not None]
+    above = [(k, s) for k, s in walls if s >= spot * 0.995]
+    below = [(k, s) for k, s in walls if s < spot * 0.995]
+    at_price = any(abs(s - spot) <= spot * 0.005 for k, s in walls)
+    if above:
+        k, s = min(above, key=lambda w: w[1])
+        nxt = _next_pile(s, True)
+        tail = (f"the next big pile up is <b>${nxt:g}</b>"
+                if nxt is not None else
+                "there is no other big pile above it on this map - "
+                "open air")
+        pts.append(f"If price pushes through <b>${s:g}</b> and holds "
+                   f"above it, that ceiling can flip into a floor - "
+                   f"and {tail}")
+    elif walls:
+        pts.append("Price is already above every wall on this map - "
+                   "nothing overhead caps it, so the top pile "
+                   "underneath is the line it has to hold")
+    if below:
+        k, s = max(below, key=lambda w: w[1])
+        nxt = _next_pile(s, False)
+        tail = (f"if it breaks, the next big pile down is "
+                f"<b>${nxt:g}</b>" if nxt is not None else
+                "there is no other big pile below it on this map")
+        pts.append(f"If price drops to <b>${s:g}</b>, that is the "
+                   f"first real test - a bounce there keeps this "
+                   f"range alive; {tail}")
+    elif walls and not at_price:
+        pts.append("No wall sits underneath price on this map - no "
+                   "real floor until positioning builds below it")
+    if not walls:
+        pts.append("Positioning is scattered - no wall to break or "
+                   "bounce off, so there is no clean level to watch")
     cols = d.get("col_totals") or []
-    if cols and net != 0 and lean != "NEUTRAL":
+    if cols:
         tot_abs = sum(abs(c) for c in cols)
         bi = max(range(len(cols)), key=lambda j: abs(cols[j]))
         share = abs(cols[bi]) / tot_abs if tot_abs else 0
+        be = d["expiries"][bi]
         if share > 0.5:
-            be = d["expiries"][bi]
-            color_word = "green" if net > 0 else "red"
-            wall_s = pw_s if lean == "BULLISH" else cw_s
-            wall_name = "put wall" if lean == "BULLISH" else "call wall"
-            if be["dte"] <= 21:
-                lead = (f"Most of the {color_word} on this map "
-                        f"expires soon ")
-            else:
-                lead = (f"Most of the {color_word} on this map sits "
-                        f"in one expiry ")
-            pts.append(f"{lead}- the {be['label']} expiry "
-                       f"({be['dte']} days out) holds about "
-                       f"{share:.0%} of all gamma")
-            if wall_s is not None:
-                wi = min(range(len(d["strikes"])),
-                         key=lambda i: abs(d["strikes"][i] - wall_s))
-                wrow = d["matrix"][wi]
-                wj = max(range(len(wrow)), key=lambda j: abs(wrow[j]))
-                we = d["expiries"][wj]
-                if we["label"] != be["label"]:
-                    when = ("longer-dated" if we["dte"] > be["dte"]
-                            else "other")
-                    pts.append(f"The ${wall_s:g} {wall_name} is built on "
-                               f"{when} options, heaviest in {we['label']}")
-    if not pts:
-        # generic fallback: walls move over time (unique beginner insight -
-        # the banner owns the verdict, card 1 owns the magnet, card 2 owns
-        # the price position, the play card owns the trade).
-        pts = ["Walls are not permanent - they shift as expiry dates pass",
-               "Heaviest action right now: the expiry named in the tile "
-               "above"]
-    if lean == "NEUTRAL":
-        pts.append("No single strike stands out today, so there is no MAP "
-                   "POINTS TO card")
-    else:
-        pts.append("The MAP POINTS TO card below names the exact strike and "
-                   "date")
+            pts.append(f"One date drives this read: the {be['label']} "
+                       f"expiry ({be['dte']} day"
+                       f"{'s' if be['dte'] != 1 else ''} out) holds about "
+                       f"{share:.0%} of all the gamma on the map - "
+                       f"after that date a big chunk of this map "
+                       f"disappears, so the read can change fast")
+        else:
+            pts.append("Gamma is spread across the expiries - no "
+                       "single date drives this read, so it should "
+                       "change slowly, not flip overnight")
     cards.append({"n": 3, "title": "WHAT TO WATCH", "points": pts,
                   "hot": False})
 
@@ -512,21 +515,23 @@ def page_extras(d):
         share = (abs(wrow[ei]) / row_abs) if (ei is not None and row_abs) else 0
         dte = next((e["dte"] for e in d["expiries"]
                     if e["label"] == s["expiry"]), None)
-        if opp_v and opp_s is not None:
-            dom = abs(wall_v) / abs(opp_v)
-            facts = (f"Wall {dom:.1f}x heavier than ${opp_s:g}, "
-                     f"{share:.0%} of it in {s['expiry']}")
-        else:
-            facts = (f"No opposing wall - {share:.0%} of the {noun} gamma "
-                     f"sits in {s['expiry']}")
-        if dte is not None and dte < 30:
-            facts += f" - only {dte} days left"
+        # Facts line owns this strike's weight in the whole map. (A
+        # distance line here repeated card 2 word for word whenever
+        # the play strike is a wall - which is most of the time.)
+        map_abs = sum(abs(t) for t in d["totals"]) or 0
+        share_all = row_abs / map_abs if map_abs else 0
+        wall_s2 = cw_s if s["side"] == "calls" else pw_s
+        facts = (f"This one strike holds about {share_all:.0%} of "
+                 f"all the gamma on the map")
+        if wall_s2 is not None and snum == wall_s2:
+            facts += " - it is the biggest wall on the map itself"
         if dte is None:
             decay = None
         elif dte <= 7:
-            decay = (f"Only {dte} days to expiry - time decay is brutal "
-                     f"this close. The option bleeds value every day, "
-                     f"faster into expiry.")
+            decay = (f"Only {dte} day{'s' if dte != 1 else ''} to "
+                     f"expiry - time decay is brutal this close. The "
+                     f"option bleeds value every day, faster into "
+                     f"expiry.")
         elif dte <= 21:
             decay = (f"{dte} days to expiry - decay is moderate now and "
                      f"accelerates hard in the final week.")
@@ -536,8 +541,36 @@ def page_extras(d):
         else:
             decay = (f"{dte} days to expiry - plenty of time. Decay is "
                      f"slow at this distance.")
-        points = [f"The {s['strike']} strike holds {_fmt_cell(wall_v)} of "
-                  f"{noun} gamma - the biggest {noun} pile on the map."]
+        # Bullets own the explanation: what you are seeing in plain
+        # words, what would kill the read, and the decay clock. The
+        # pile size stated is this strike's own biggest cell, measured
+        # from its row - not the wall total card 1 already stated.
+        cell_v = wrow[ei] if ei is not None else 0
+        if s["side"] == "calls":
+            seeing = (f"What you are seeing: the heaviest call pile "
+                      f"above the price sits at this strike, and "
+                      f"{share:.0%} of that strike's gamma lands in "
+                      f"this one expiry - {_fmt_cell(cell_v)} in a "
+                      f"single cell of the map. One strike, one date: "
+                      f"piles like that pull price toward them and "
+                      f"often stall it on the first test.")
+            kill = (f"What would kill it: price getting rejected at "
+                    f"{s['strike']} and falling away from it, or this "
+                    f"pile shrinking on the next map - the read lives "
+                    f"and dies with this pile")
+        else:
+            seeing = (f"What you are seeing: the heaviest put pile "
+                      f"below the price sits at this strike, and "
+                      f"{share:.0%} of that strike's gamma lands in "
+                      f"this one expiry - {_fmt_cell(cell_v)} in a "
+                      f"single cell of the map. One strike, one date: "
+                      f"piles like that pull price toward them and "
+                      f"often floor it on the first test.")
+            kill = (f"What would kill it: price bouncing off "
+                    f"{s['strike']} and climbing away from it, or this "
+                    f"pile shrinking on the next map - the read lives "
+                    f"and dies with this pile")
+        points = [seeing, kill]
         if decay:
             points.append(decay)
         play = {
