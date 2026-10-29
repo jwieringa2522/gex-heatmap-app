@@ -338,6 +338,7 @@ APP_PAGE = """<!DOCTYPE html>
   <div class="who">Logged in as <b>__NAME__</b> &middot; <a href="/api/logout">log out</a></div>
   <div id="installTip" style="display:none;background:#0b0e13;border:1px solid #30857a;border-radius:10px;padding:10px 14px;margin:0 auto 16px;max-width:520px;font-size:13px;color:#bbb;text-align:left;">
     Get the app version - <b style="color:#fff">add this page to your home screen</b> and it opens full-screen with its own icon, no app store needed. <span id="installHow"></span>
+    <button id="installBtn" type="button" style="display:none;background:#30857a;color:#fff;border:0;border-radius:8px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer;margin-top:8px;">Install app</button>
     <a href="#" id="installX" style="color:#30857a;text-decoration:none;float:right;">dismiss</a>
   </div>
   <script>
@@ -345,10 +346,30 @@ APP_PAGE = """<!DOCTYPE html>
       var standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
       if (standalone || localStorage.getItem('sbybInstallDismissed')) return;
       var ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
-      document.getElementById('installHow').textContent = ios ? 'On iPhone: tap Share, then Add to Home Screen.' : 'On Android: tap the browser menu, then Install app or Add to Home screen.';
+      var how = document.getElementById('installHow');
+      how.textContent = ios ? 'On iPhone: tap Share, then Add to Home Screen.' : 'On Android: tap the browser menu, then Install app or Add to Home screen.';
       var tip = document.getElementById('installTip');
+      var btn = document.getElementById('installBtn');
       tip.style.display = 'block';
       document.getElementById('installX').addEventListener('click', function(e){ e.preventDefault(); localStorage.setItem('sbybInstallDismissed','1'); tip.style.display = 'none'; });
+      var deferredPrompt = null;
+      window.addEventListener('beforeinstallprompt', function(e){
+        e.preventDefault();
+        deferredPrompt = e;
+        how.textContent = 'On Android: tap Install app - one tap, no menu hunting.';
+        btn.style.display = 'inline-block';
+        tip.style.display = 'block';
+      });
+      btn.addEventListener('click', function(){
+        if (!deferredPrompt) return;
+        deferredPrompt.prompt();
+        deferredPrompt.userChoice.then(function(choice){
+          deferredPrompt = null;
+          btn.style.display = 'none';
+          if (choice && choice.outcome === 'accepted') { tip.style.display = 'none'; }
+        });
+      });
+      window.addEventListener('appinstalled', function(){ tip.style.display = 'none'; });
     })();
   </script>
   <h2 style="font-weight:600; font-size:20px; margin-bottom:6px;">GEX Heatmap</h2>
