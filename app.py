@@ -227,6 +227,15 @@ LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SPY BEFORE YOU BUY - GEX Heatmap</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="GEX Heatmap">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){})})}</script>
 <style>
   body { background:#000; color:#fff; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; margin:0; padding:24px 16px 48px; }
   .wrap { max-width:920px; margin:0 auto; text-align:center; }
@@ -252,6 +261,15 @@ APP_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SPY BEFORE YOU BUY - GEX Heatmap</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="GEX Heatmap">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){})})}</script>
 <style>
   * { box-sizing: border-box; }
   body { background:#000; color:#fff; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; margin:0; padding:24px 16px 48px; overflow-x:hidden; }
@@ -318,6 +336,21 @@ APP_PAGE = """<!DOCTYPE html>
   <h1>SPY BEFORE YOU BUY</h1>
   <div class="tag">WAIT. CONFIRM. EXECUTE.</div>
   <div class="who">Logged in as <b>__NAME__</b> &middot; <a href="/api/logout">log out</a></div>
+  <div id="installTip" style="display:none;background:#0b0e13;border:1px solid #30857a;border-radius:10px;padding:10px 14px;margin:0 auto 16px;max-width:520px;font-size:13px;color:#bbb;text-align:left;">
+    Get the app version - <b style="color:#fff">add this page to your home screen</b> and it opens full-screen with its own icon, no app store needed. <span id="installHow"></span>
+    <a href="#" id="installX" style="color:#30857a;text-decoration:none;float:right;">dismiss</a>
+  </div>
+  <script>
+    (function(){
+      var standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+      if (standalone || localStorage.getItem('sbybInstallDismissed')) return;
+      var ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+      document.getElementById('installHow').textContent = ios ? 'On iPhone: tap Share, then Add to Home Screen.' : 'On Android: tap the browser menu, then Install app or Add to Home screen.';
+      var tip = document.getElementById('installTip');
+      tip.style.display = 'block';
+      document.getElementById('installX').addEventListener('click', function(e){ e.preventDefault(); localStorage.setItem('sbybInstallDismissed','1'); tip.style.display = 'none'; });
+    })();
+  </script>
   <h2 style="font-weight:600; font-size:20px; margin-bottom:6px;">GEX Heatmap</h2>
   <p style="color:#888; font-size:14px; margin-top:0;">Type any ticker. See where the gamma walls are.</p>
   <form id="f">
@@ -530,6 +563,75 @@ def agree_accept(code: str, request: Request):
 
 
 # ---------- routes ----------
+# ---------- installable app (PWA): manifest, service worker, icons ------
+# Public on purpose: browsers fetch these before login and they carry no
+# member data. The service worker never caches pages or API responses -
+# only the icons - so login and membership checks always hit the network.
+MANIFEST = {
+    "name": "SPY BEFORE YOU BUY - GEX Heatmap",
+    "short_name": "GEX Heatmap",
+    "description": ("Members-only GEX heatmap tool - see where the gamma "
+                    "walls are on any ticker."),
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#000000",
+    "theme_color": "#000000",
+    "icons": [
+        {"src": "/icons/icon-192.png", "sizes": "192x192",
+         "type": "image/png", "purpose": "any"},
+        {"src": "/icons/icon-512.png", "sizes": "512x512",
+         "type": "image/png", "purpose": "any"},
+        {"src": "/icons/icon-maskable-512.png", "sizes": "512x512",
+         "type": "image/png", "purpose": "maskable"},
+    ],
+}
+
+SW_JS = """// Installable-app service worker. Network for everything except the
+// icons, which are cache-first. Pages, logins and heatmaps are never
+// cached, so membership checks stay live.
+var CACHE = 'sbyb-icons-v1';
+var ICONS = ['/icons/icon-192.png', '/icons/icon-512.png',
+             '/icons/icon-maskable-512.png', '/icons/apple-touch-icon.png'];
+self.addEventListener('install', function(e) {
+  e.waitUntil(caches.open(CACHE).then(function(c) {
+    return c.addAll(ICONS);
+  }).then(function() { return self.skipWaiting(); }));
+});
+self.addEventListener('activate', function(e) {
+  e.waitUntil(self.clients.claim());
+});
+self.addEventListener('fetch', function(e) {
+  var url = new URL(e.request.url);
+  if (url.pathname.indexOf('/icons/') === 0) {
+    e.respondWith(caches.match(e.request).then(function(r) {
+      return r || fetch(e.request);
+    }));
+  }
+});
+"""
+
+
+@app.get("/manifest.webmanifest")
+def manifest():
+    return JSONResponse(MANIFEST, media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+def service_worker():
+    return HTMLResponse(SW_JS, media_type="application/javascript")
+
+
+@app.get("/icons/{name}")
+def icon(name: str):
+    safe = {"icon-192.png", "icon-512.png", "icon-maskable-512.png",
+            "apple-touch-icon.png"}
+    if name not in safe:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(os.path.join(APP_DIR, "static", "icons", name),
+                        media_type="image/png")
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     u = session_user(request)
