@@ -247,7 +247,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
   .foot a { color:#30857a; text-decoration:none; }
 </style></head><body>
   <div id="splash" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;align-items:center;justify-content:center;opacity:1;transition:opacity .3s ease;">
-    <img src="/icons/icon-512.png" alt="GEX Heatmap" style="width:min(55vw,240px);height:auto;">
+    <img src="/icons/icon-512.png" alt="GEX Heatmap" style="width:min(60vw,262px);height:auto;">
   </div>
   <script>
     (function(){
@@ -352,7 +352,7 @@ APP_PAGE = """<!DOCTYPE html>
   .foot a { color:#30857a; text-decoration:none; }
 </style></head><body>
   <div id="splash" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;align-items:center;justify-content:center;opacity:1;transition:opacity .3s ease;">
-    <img src="/icons/icon-512.png" alt="GEX Heatmap" style="width:min(55vw,240px);height:auto;">
+    <img src="/icons/icon-512.png" alt="GEX Heatmap" style="width:min(60vw,262px);height:auto;">
   </div>
   <script>
     (function(){
@@ -647,7 +647,7 @@ MANIFEST = {
 SW_JS = """// Installable-app service worker. Network for everything except the
 // icons, which are cache-first. Pages, logins and heatmaps are never
 // cached, so membership checks stay live.
-var CACHE = 'sbyb-icons-v2';
+var CACHE = 'sbyb-icons-v3';
 var ICONS = ['/icons/icon-192.png', '/icons/icon-512.png',
              '/icons/icon-maskable-512.png', '/icons/apple-touch-icon.png'];
 self.addEventListener('install', function(e) {
