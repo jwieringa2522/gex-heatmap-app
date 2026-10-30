@@ -814,6 +814,9 @@ def _subs_db():
         stripe_customer_id TEXT, stripe_subscription_id TEXT,
         checkout_session_id TEXT, invite_link TEXT,
         current_period_end REAL, created_ts REAL, updated_ts REAL)""")
+    cols = {r[1] for r in con.execute("PRAGMA table_info(site_subs)")}
+    if "tv_username" not in cols:
+        con.execute("ALTER TABLE site_subs ADD COLUMN tv_username TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS stripe_events(
         event_id TEXT PRIMARY KEY, type TEXT, ts REAL)""")
     return con
@@ -881,7 +884,20 @@ def _on_checkout_completed(con, obj):
     if not email:
         return
     mode = obj.get("mode")
-    status = "lifetime" if mode == "payment" else "active"
+    if mode == "payment":
+        status = "lifetime"
+    elif obj.get("payment_status") == "no_payment_required":
+        # Free-trial start: full access now, first charge when it converts.
+        status = "trialing"
+    else:
+        status = "active"
+    tv_username = None
+    for f in obj.get("custom_fields") or []:
+        key = (f.get("key") or "").lower()
+        label = ((f.get("label") or {}).get("custom") or "").lower()
+        if "tradingview" in key or "tradingview" in label:
+            tv_username = ((f.get("text") or {}).get("value") or "").strip() \
+                or None
     row = con.execute(
         "SELECT invite_link, status FROM site_subs WHERE email=?",
         (email,)).fetchone()
@@ -892,16 +908,18 @@ def _on_checkout_completed(con, obj):
     con.execute(
         """INSERT INTO site_subs(email, plan, status, stripe_customer_id,
                stripe_subscription_id, checkout_session_id, invite_link,
-               current_period_end, created_ts, updated_ts)
-           VALUES(?,?,?,?,?,?,?,?,?,?)
+               current_period_end, created_ts, updated_ts, tv_username)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(email) DO UPDATE SET
              plan=excluded.plan, status=excluded.status,
              stripe_customer_id=excluded.stripe_customer_id,
              stripe_subscription_id=excluded.stripe_subscription_id,
              checkout_session_id=excluded.checkout_session_id,
-             invite_link=excluded.invite_link, updated_ts=excluded.updated_ts""",
+             invite_link=excluded.invite_link, updated_ts=excluded.updated_ts,
+             tv_username=COALESCE(excluded.tv_username, site_subs.tv_username)""",
         (email, _sub_plan(obj), status, obj.get("customer"),
-         obj.get("subscription"), obj.get("id"), invite, None, now, now))
+         obj.get("subscription"), obj.get("id"), invite, None, now, now,
+         tv_username))
 
 
 def _find_sub(con, obj):
@@ -1056,10 +1074,10 @@ def stripe_subs(key: str = ""):
         rows = con.execute(
             """SELECT email, plan, status, stripe_customer_id,
                stripe_subscription_id, invite_link, current_period_end,
-               updated_ts FROM site_subs""").fetchall()
+               updated_ts, tv_username FROM site_subs""").fetchall()
     finally:
         con.close()
     cols = ("email", "plan", "status", "stripe_customer_id",
             "stripe_subscription_id", "invite_link", "current_period_end",
-            "updated_ts")
+            "updated_ts", "tv_username")
     return {"subs": [dict(zip(cols, r)) for r in rows]}
