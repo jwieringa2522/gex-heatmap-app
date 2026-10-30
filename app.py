@@ -777,3 +777,289 @@ def image(name: str, request: Request):
     if not os.path.exists(png_path):
         return JSONResponse({"detail": "not built yet"}, status_code=404)
     return FileResponse(png_path, media_type="image/png")
+
+
+# ---------- website subscriptions (Stripe -> Telegram access) ----------
+# The Spy Before You Buy site sells subscriptions WITHOUT X (Justin's
+# order, Oct 29 2026). Flow: Stripe Payment Link checkout -> webhook here
+# records the subscriber and mints a personal one-time Telegram invite ->
+# buyer lands on /access and gets the disclaimer-gate link -> the VM-side
+# roster sync (telegram-subscribers/site_sync.py) mirrors the row, tracks
+# the join, and removes the member when the subscription lapses, is
+# cancelled past its paid period, or is refunded.
+#
+# Everything below is INERT until these env vars are set on Render:
+#   STRIPE_WEBHOOK_SECRET - webhook signing secret (turns the webhook on)
+#   SITE_SUBS_READ_KEY    - shared secret for the /stripe/subs read API
+#   STRIPE_PLAN_MAP       - optional JSON mapping a payment-link id,
+#                           price id, or amount_total (cents, as string)
+#                           to a plan label; the checkout metadata "plan"
+#                           wins when present.
+# No new dependencies: the webhook signature is verified with stdlib HMAC.
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+SITE_SUBS_READ_KEY = os.environ.get("SITE_SUBS_READ_KEY", "")
+SBYB_TEST_MODE = os.environ.get("SBYB_TEST_MODE", "") == "1"
+try:
+    STRIPE_PLAN_MAP = json.loads(os.environ.get("STRIPE_PLAN_MAP", "{}"))
+except Exception:
+    STRIPE_PLAN_MAP = {}
+GATE_BASE = PUBLIC_URL or "https://sbyb-gex-heatmap.onrender.com"
+
+
+def _subs_db():
+    con = _db()
+    con.execute("""CREATE TABLE IF NOT EXISTS site_subs(
+        email TEXT PRIMARY KEY,
+        plan TEXT, status TEXT,
+        stripe_customer_id TEXT, stripe_subscription_id TEXT,
+        checkout_session_id TEXT, invite_link TEXT,
+        current_period_end REAL, created_ts REAL, updated_ts REAL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS stripe_events(
+        event_id TEXT PRIMARY KEY, type TEXT, ts REAL)""")
+    return con
+
+
+def _verify_stripe_sig(payload: bytes, sig_header: str, secret: str) -> bool:
+    """Standard Stripe webhook signature check (t + '.' + raw body,
+    HMAC-SHA256, any matching v1 wins, 5-minute timestamp tolerance)."""
+    if not sig_header:
+        return False
+    ts, sigs = "", []
+    for part in sig_header.split(","):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        if k.strip() == "t":
+            ts = v.strip()
+        elif k.strip() == "v1":
+            sigs.append(v.strip())
+    if not ts or not sigs:
+        return False
+    try:
+        if abs(time.time() - int(ts)) > 300:
+            return False
+    except ValueError:
+        return False
+    signed = ts.encode() + b"." + payload
+    expect = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expect, s) for s in sigs)
+
+
+def _make_site_invite(email: str):
+    """Personal one-time channel invite for a site subscriber."""
+    if SBYB_TEST_MODE:
+        code = hashlib.sha256(
+            f"test:{email}:{time.time()}".encode()).hexdigest()[:16]
+        return f"https://t.me/+TEST{code}"
+    if not BOT_TOKEN:
+        return None
+    try:
+        res = _tg_api("createChatInviteLink", {
+            "chat_id": CHANNEL_ID,
+            "name": ("site:" + email)[:32],
+            "member_limit": 1,
+        })
+        return res.get("result", {}).get("invite_link")
+    except Exception:
+        return None
+
+
+def _sub_plan(obj, session=None):
+    meta = (session or obj).get("metadata") or {}
+    if meta.get("plan"):
+        return meta["plan"]
+    for key in (obj.get("payment_link"), str(obj.get("amount_total") or "")):
+        if key and key in STRIPE_PLAN_MAP:
+            return STRIPE_PLAN_MAP[key]
+    return "Membership"
+
+
+def _on_checkout_completed(con, obj):
+    email = ((obj.get("customer_details") or {}).get("email")
+             or obj.get("customer_email") or "")
+    email = email.strip().lower()
+    if not email:
+        return
+    mode = obj.get("mode")
+    status = "lifetime" if mode == "payment" else "active"
+    row = con.execute(
+        "SELECT invite_link, status FROM site_subs WHERE email=?",
+        (email,)).fetchone()
+    invite = row[0] if row else None
+    if not invite or (row and row[1] in ("canceled", "unpaid", "refunded")):
+        invite = _make_site_invite(email) or invite
+    now = time.time()
+    con.execute(
+        """INSERT INTO site_subs(email, plan, status, stripe_customer_id,
+               stripe_subscription_id, checkout_session_id, invite_link,
+               current_period_end, created_ts, updated_ts)
+           VALUES(?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(email) DO UPDATE SET
+             plan=excluded.plan, status=excluded.status,
+             stripe_customer_id=excluded.stripe_customer_id,
+             stripe_subscription_id=excluded.stripe_subscription_id,
+             checkout_session_id=excluded.checkout_session_id,
+             invite_link=excluded.invite_link, updated_ts=excluded.updated_ts""",
+        (email, _sub_plan(obj), status, obj.get("customer"),
+         obj.get("subscription"), obj.get("id"), invite, None, now, now))
+
+
+def _find_sub(con, obj):
+    sub_id = obj.get("id") if obj.get("object") == "subscription" \
+        else obj.get("subscription")
+    row = None
+    if sub_id:
+        row = con.execute(
+            "SELECT email FROM site_subs WHERE stripe_subscription_id=?",
+            (sub_id,)).fetchone()
+    if not row and obj.get("customer"):
+        row = con.execute(
+            "SELECT email FROM site_subs WHERE stripe_customer_id=?",
+            (obj["customer"],)).fetchone()
+    return row[0] if row else None
+
+
+def _on_subscription_updated(con, obj):
+    email = _find_sub(con, obj)
+    if email:
+        con.execute(
+            """UPDATE site_subs SET status=?, current_period_end=?,
+               stripe_subscription_id=?, updated_ts=? WHERE email=?""",
+            (obj.get("status"), obj.get("current_period_end"),
+             obj.get("id"), time.time(), email))
+
+
+def _on_subscription_deleted(con, obj):
+    email = _find_sub(con, obj)
+    if email:
+        con.execute(
+            """UPDATE site_subs SET status='canceled',
+               current_period_end=?, updated_ts=? WHERE email=?""",
+            (obj.get("current_period_end") or time.time(),
+             time.time(), email))
+
+
+def _on_payment_failed(con, obj):
+    email = _find_sub(con, obj)
+    if email:
+        con.execute(
+            """UPDATE site_subs SET status='past_due', updated_ts=?
+               WHERE email=? AND status IN ('active','trialing')""",
+            (time.time(), email))
+
+
+def _on_charge_reversed(con, obj):
+    email = _find_sub(con, obj)
+    if email:
+        con.execute(
+            "UPDATE site_subs SET status='refunded', updated_ts=? WHERE email=?",
+            (time.time(), email))
+
+
+@app.post("/stripe/webhook")
+async def stripe_webhook(request: Request):
+    if not STRIPE_WEBHOOK_SECRET:
+        return JSONResponse({"detail": "webhooks not configured"},
+                            status_code=503)
+    payload = await request.body()
+    if not _verify_stripe_sig(payload,
+                               request.headers.get("stripe-signature", ""),
+                               STRIPE_WEBHOOK_SECRET):
+        return JSONResponse({"detail": "bad signature"}, status_code=400)
+    try:
+        event = json.loads(payload)
+    except Exception:
+        return JSONResponse({"detail": "bad payload"}, status_code=400)
+    etype = event.get("type", "")
+    obj = (event.get("data") or {}).get("object") or {}
+    con = _subs_db()
+    try:
+        cur = con.execute(
+            "INSERT OR IGNORE INTO stripe_events(event_id, type, ts) "
+            "VALUES (?,?,?)", (event.get("id", ""), etype, time.time()))
+        con.commit()
+        if cur.rowcount == 0:
+            return {"received": True, "duplicate": True}
+        if etype == "checkout.session.completed":
+            _on_checkout_completed(con, obj)
+        elif etype == "customer.subscription.updated":
+            _on_subscription_updated(con, obj)
+        elif etype == "customer.subscription.deleted":
+            _on_subscription_deleted(con, obj)
+        elif etype == "invoice.payment_failed":
+            _on_payment_failed(con, obj)
+        elif etype in ("charge.refunded", "charge.dispute.created"):
+            _on_charge_reversed(con, obj)
+        con.commit()
+    finally:
+        con.close()
+    return {"received": True}
+
+
+ACCESS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPY BEFORE YOU BUY - Your access</title>
+<style>
+body{background:#000;color:#fff;font-family:Arial,sans-serif;text-align:center;
+padding:64px 24px;margin:0}
+h1{font-stretch:condensed;letter-spacing:2px;font-size:34px;margin:0 0 6px}
+.tag{color:#5e8f86;letter-spacing:4px;font-size:12px;margin-bottom:36px}
+p{color:#cfd8d5;max-width:520px;margin:0 auto 28px;line-height:1.55}
+a.btn{display:inline-block;background:#5e8f86;color:#fff;text-decoration:none;
+padding:14px 30px;border-radius:999px;font-weight:bold;letter-spacing:1px}
+.small{color:#7d8a87;font-size:13px;margin-top:26px}
+</style></head><body>
+<h1>SPY BEFORE YOU BUY</h1>
+<div class="tag">WAIT. CONFIRM. EXECUTE.</div>
+__BODY__
+</body></html>"""
+
+
+@app.get("/access", response_class=HTMLResponse)
+def access_page(session_id: str = ""):
+    row = None
+    if session_id:
+        con = _subs_db()
+        try:
+            row = con.execute(
+                """SELECT email, plan, status, invite_link FROM site_subs
+                   WHERE checkout_session_id=?""", (session_id,)).fetchone()
+        finally:
+            con.close()
+    if row and row[3]:
+        code = row[3].split("https://t.me/+", 1)[-1]
+        body = (f"<p>Payment confirmed - welcome in. Your personal Telegram "
+                f"access link is below. It is tied to your subscription and "
+                f"works once, so keep it to yourself.</p>"
+                f'<a class="btn" href="{GATE_BASE}/agree/{code}">'
+                f"GET MY TELEGRAM ACCESS</a>"
+                f'<div class="small">Plan: {row[1]} - {row[0]}</div>')
+    elif row:
+        body = ("<p>Payment confirmed. Your personal access link is still "
+                "being created - refresh this page in a minute.</p>")
+    else:
+        body = ("<p>We could not find that checkout yet. If you just paid, "
+                "give it a minute and refresh. If it still does not show, "
+                "contact the owner with the email you paid with.</p>")
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+@app.get("/stripe/subs")
+def stripe_subs(key: str = ""):
+    """Machine read for the VM roster sync. 404 unless the shared key
+    configured on Render matches - reveals nothing when unconfigured."""
+    if not SITE_SUBS_READ_KEY or not hmac.compare_digest(key,
+                                                         SITE_SUBS_READ_KEY):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _subs_db()
+    try:
+        rows = con.execute(
+            """SELECT email, plan, status, stripe_customer_id,
+               stripe_subscription_id, invite_link, current_period_end,
+               updated_ts FROM site_subs""").fetchall()
+    finally:
+        con.close()
+    cols = ("email", "plan", "status", "stripe_customer_id",
+            "stripe_subscription_id", "invite_link", "current_period_end",
+            "updated_ts")
+    return {"subs": [dict(zip(cols, r)) for r in rows]}
