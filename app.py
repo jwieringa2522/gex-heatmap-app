@@ -804,6 +804,9 @@ try:
 except Exception:
     STRIPE_PLAN_MAP = {}
 GATE_BASE = PUBLIC_URL or "https://sbyb-gex-heatmap.onrender.com"
+IO_PLAN = "Indicators Only"  # TradingView access only - never Telegram
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PORTAL_URL = os.environ.get("STRIPE_PORTAL_URL", "")
 
 
 def _subs_db():
@@ -898,11 +901,15 @@ def _on_checkout_completed(con, obj):
         if "tradingview" in key or "tradingview" in label:
             tv_username = ((f.get("text") or {}).get("value") or "").strip() \
                 or None
+    plan = _sub_plan(obj)
     row = con.execute(
-        "SELECT invite_link, status FROM site_subs WHERE email=?",
-        (email,)).fetchone()
+        """SELECT invite_link, status, stripe_subscription_id
+           FROM site_subs WHERE email=?""", (email,)).fetchone()
     invite = row[0] if row else None
-    if not invite or (row and row[1] in ("canceled", "unpaid", "refunded")):
+    old_sub_id = row[2] if row else None
+    if plan == IO_PLAN:
+        invite = None  # Indicators Only never gets a Telegram invite
+    elif not invite or (row and row[1] in ("canceled", "unpaid", "refunded")):
         invite = _make_site_invite(email) or invite
     now = time.time()
     con.execute(
@@ -913,13 +920,24 @@ def _on_checkout_completed(con, obj):
            ON CONFLICT(email) DO UPDATE SET
              plan=excluded.plan, status=excluded.status,
              stripe_customer_id=excluded.stripe_customer_id,
-             stripe_subscription_id=excluded.stripe_subscription_id,
              checkout_session_id=excluded.checkout_session_id,
              invite_link=excluded.invite_link, updated_ts=excluded.updated_ts,
+             stripe_subscription_id=COALESCE(
+                 excluded.stripe_subscription_id,
+                 site_subs.stripe_subscription_id),
              tv_username=COALESCE(excluded.tv_username, site_subs.tv_username)""",
-        (email, _sub_plan(obj), status, obj.get("customer"),
+        (email, plan, status, obj.get("customer"),
          obj.get("subscription"), obj.get("id"), invite, None, now, now,
          tv_username))
+    if mode == "payment" and old_sub_id:
+        # Lifetime bought: stop the recurring subscription so the member
+        # is never double-charged. If the cancel cannot run (no API key
+        # configured), the id stays on file and the roster sync flags
+        # the overlap for manual cancelling.
+        if _cancel_stripe_subscription(old_sub_id):
+            con.execute(
+                """UPDATE site_subs SET stripe_subscription_id=NULL
+                   WHERE email=?""", (email,))
 
 
 def _find_sub(con, obj):
@@ -937,14 +955,62 @@ def _find_sub(con, obj):
     return row[0] if row else None
 
 
+def _sub_updated_plan(obj):
+    """Plan label for a subscription object, from its price id via
+    STRIPE_PLAN_MAP (price ids are the keys used at activation)."""
+    for item in (obj.get("items") or {}).get("data") or []:
+        price_id = ((item.get("price") or {}).get("id")) or ""
+        if price_id in STRIPE_PLAN_MAP:
+            return STRIPE_PLAN_MAP[price_id]
+    return None
+
+
+def _cancel_stripe_subscription(sub_id):
+    """Cancel a recurring subscription via the Stripe API (used when a
+    member buys Lifetime so they are never double-charged). Needs
+    STRIPE_SECRET_KEY; without it the roster sync flags the overlap
+    for manual cancelling instead."""
+    if not STRIPE_SECRET_KEY or not sub_id or SBYB_TEST_MODE:
+        return False
+    try:
+        req = urllib.request.Request(
+            f"https://api.stripe.com/v1/subscriptions/{sub_id}",
+            method="DELETE")
+        req.add_header("Authorization", f"Bearer {STRIPE_SECRET_KEY}")
+        urllib.request.urlopen(req, timeout=15).read()
+        return True
+    except Exception:
+        return False
+
+
 def _on_subscription_updated(con, obj):
     email = _find_sub(con, obj)
-    if email:
-        con.execute(
-            """UPDATE site_subs SET status=?, current_period_end=?,
-               stripe_subscription_id=?, updated_ts=? WHERE email=?""",
-            (obj.get("status"), obj.get("current_period_end"),
-             obj.get("id"), time.time(), email))
+    if not email:
+        return
+    con.execute(
+        """UPDATE site_subs SET status=?, current_period_end=?,
+           stripe_subscription_id=?, updated_ts=? WHERE email=?""",
+        (obj.get("status"), obj.get("current_period_end"),
+         obj.get("id"), time.time(), email))
+    # Plan switches (upgrades/downgrades via the Stripe customer portal)
+    # change entitlements: Indicators Only has no Telegram access, full
+    # plans do. Moving up to a full plan mints a fresh invite; the
+    # roster sync enforces the Telegram side from the plan on file.
+    new_plan = _sub_updated_plan(obj)
+    if new_plan:
+        row = con.execute(
+            "SELECT plan, invite_link FROM site_subs WHERE email=?",
+            (email,)).fetchone()
+        old_plan, invite = row if row else (None, None)
+        if new_plan != old_plan:
+            if new_plan != IO_PLAN and (old_plan == IO_PLAN or not invite):
+                invite = _make_site_invite(email) or invite
+                con.execute(
+                    "UPDATE site_subs SET invite_link=? WHERE email=?",
+                    (invite, email))
+            con.execute(
+                "UPDATE site_subs SET plan=? WHERE email=?",
+                (new_plan, email))
 
 
 def _on_subscription_deleted(con, obj):
@@ -1044,14 +1110,25 @@ def access_page(session_id: str = ""):
                    WHERE checkout_session_id=?""", (session_id,)).fetchone()
         finally:
             con.close()
-    if row and row[3]:
+    if row and row[1] == IO_PLAN:
+        body = ("<p>Payment confirmed - welcome in. Your plan is "
+                "TradingView indicators only, so there is no Telegram link "
+                "with it. Your indicators are being switched on for the "
+                "TradingView username you gave at checkout - they appear "
+                "under Invite-only scripts in your TradingView account.</p>"
+                f'<div class="small">Plan: {row[1]} - {row[0]}</div>')
+    elif row and row[3]:
         code = row[3].split("https://t.me/+", 1)[-1]
+        portal = (f'<div class="small"><a href="{STRIPE_PORTAL_URL}">'
+                  f"Manage or upgrade my subscription</a></div>"
+                  if STRIPE_PORTAL_URL else "")
         body = (f"<p>Payment confirmed - welcome in. Your personal Telegram "
                 f"access link is below. It is tied to your subscription and "
                 f"works once, so keep it to yourself.</p>"
                 f'<a class="btn" href="{GATE_BASE}/agree/{code}">'
                 f"GET MY TELEGRAM ACCESS</a>"
-                f'<div class="small">Plan: {row[1]} - {row[0]}</div>')
+                f'<div class="small">Plan: {row[1]} - {row[0]}</div>'
+                f"{portal}")
     elif row:
         body = ("<p>Payment confirmed. Your personal access link is still "
                 "being created - refresh this page in a minute.</p>")
