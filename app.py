@@ -822,6 +822,8 @@ def _subs_db():
         con.execute("ALTER TABLE site_subs ADD COLUMN tv_username TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS stripe_events(
         event_id TEXT PRIMARY KEY, type TEXT, ts REAL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS tv_claims(
+        email TEXT, tv_username TEXT, matched INTEGER, ts REAL)""")
     return con
 
 
@@ -1106,7 +1108,8 @@ def access_page(session_id: str = ""):
         con = _subs_db()
         try:
             row = con.execute(
-                """SELECT email, plan, status, invite_link FROM site_subs
+                """SELECT email, plan, status, invite_link, tv_username
+                   FROM site_subs
                    WHERE checkout_session_id=?""", (session_id,)).fetchone()
         finally:
             con.close()
@@ -1136,6 +1139,64 @@ def access_page(session_id: str = ""):
         body = ("<p>We could not find that checkout yet. If you just paid, "
                 "give it a minute and refresh. If it still does not show, "
                 "contact the owner with the email you paid with.</p>")
+    if row and (row[3] or row[1] == IO_PLAN) and not row[4]:
+        body += ('<div class="small">No TradingView username on file yet - '
+                 '<a href="/tradingview">add it here</a> so your '
+                 'indicators can be switched on.</div>')
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+TV_GOOD_STATUSES = ("active", "trialing", "lifetime", "past_due")
+
+_TV_FORM = """<p>Website subscribers: enter the email you subscribed with
+and your TradingView username. Access is switched on only for active
+website subscriptions.</p>
+<form method="post" action="/tradingview">
+<p><input name="email" type="email" required placeholder="Email you subscribed with"
+style="padding:12px 16px;border-radius:8px;border:1px solid #3a4542;background:#111;color:#fff;width:320px;max-width:84vw"></p>
+<p><input name="tv_username" type="text" required placeholder="TradingView username (exact)"
+style="padding:12px 16px;border-radius:8px;border:1px solid #3a4542;background:#111;color:#fff;width:320px;max-width:84vw"></p>
+<p><button class="btn" type="submit" style="border:0;cursor:pointer">SWITCH ON MY INDICATORS</button></p>
+</form>
+<div class="small">No TradingView account yet? A free one is all you need -
+sign up at tradingview.com, then come back with your username.</div>"""
+
+
+@app.get("/tradingview", response_class=HTMLResponse)
+def tv_claim_page():
+    return ACCESS_PAGE.replace("__BODY__", _TV_FORM)
+
+
+@app.post("/tradingview", response_class=HTMLResponse)
+async def tv_claim_submit(request: Request):
+    from urllib.parse import parse_qs
+    form = parse_qs((await request.body()).decode("utf-8", "replace"))
+    email = (form.get("email", [""])[0] or "").strip().lower()[:254]
+    tv = (form.get("tv_username", [""])[0] or "").strip().lstrip("@")[:64]
+    matched = 0
+    if email and tv:
+        con = _subs_db()
+        try:
+            row = con.execute(
+                "SELECT status FROM site_subs WHERE email=?",
+                (email,)).fetchone()
+            if row and row[0] in TV_GOOD_STATUSES:
+                matched = 1
+                con.execute(
+                    """UPDATE site_subs SET tv_username=?, updated_ts=?
+                       WHERE email=?""", (tv, time.time(), email))
+            con.execute(
+                "INSERT INTO tv_claims VALUES(?,?,?,?)",
+                (email, tv, matched, time.time()))
+            con.commit()
+        finally:
+            con.close()
+    # Same answer either way: the page never reveals whether an email
+    # belongs to a subscriber.
+    body = ("<p>Thanks - if that email matches an active website "
+            "subscription, the indicators will be switched on for that "
+            "TradingView username. They appear in TradingView under "
+            "Indicators, then Invite-only scripts.</p>")
     return ACCESS_PAGE.replace("__BODY__", body)
 
 
