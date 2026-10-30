@@ -334,7 +334,8 @@ def page_extras(d):
     # its facts and no other box restates them. Tiles own the raw numbers,
     # the banner owns the lean. Card 1 owns the walls (strike, size, which
     # is heavier). Card 2 owns price (spot, distance to each wall, room
-    # between them). Card 3 owns what to watch (break / bounce scenarios,
+    # between them, and what a flipped wall - one on the wrong side of
+    # price - means). Card 3 owns what to watch (break / bounce scenarios,
     # next piles, expiry concentration). The play card owns the pick
     # (what you are seeing, what would kill it, decay).
 
@@ -424,6 +425,28 @@ def page_extras(d):
                     "there at all")
     else:
         pts2.append("No clear walls to measure against")
+    # Flipped walls: a wall on the wrong side of price does the
+    # opposite job - an overhead put wall caps rallies instead of
+    # flooring drops, a call wall underneath props price up instead
+    # of capping it. The distances above say where the walls are;
+    # this line owns what that arrangement means. No other box
+    # states it. (Justin's ask, Oct 29: explain the wrong-side
+    # cases further in the boxes, without repeating anything.)
+    flip_put = pw_s is not None and pw_s > spot * 1.005
+    flip_call = cw_s is not None and cw_s < spot * 0.995
+    if flip_put and flip_call:
+        pts2.append("Both walls are flipped here - the put wall "
+                    "overhead caps rallies more than it floors "
+                    "drops, and the call wall underneath props "
+                    "price up more than it caps it")
+    elif flip_put:
+        pts2.append("The put wall is flipped here - sitting "
+                    "overhead, it caps rallies more than it floors "
+                    "drops")
+    elif flip_call:
+        pts2.append("The call wall is flipped here - underneath "
+                    "the price, it props price up more than it "
+                    "caps it")
     cards.append({"n": 2, "title": "SEE WHERE PRICE SITS", "hot": False,
                   "points": pts2})
 
