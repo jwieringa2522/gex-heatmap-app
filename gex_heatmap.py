@@ -548,6 +548,21 @@ def page_extras(d):
                  f"all the gamma on the map")
         if wall_s2 is not None and snum == wall_s2:
             facts += " - it is the biggest wall on the map itself"
+        elif wall_s2 is not None:
+            # Bridge line (Justin's order, Oct 31): when the play
+            # strike is not the wall itself, name the wall and where
+            # it sits so the two strikes never read as a contradiction.
+            wall_word = "call" if s["side"] == "calls" else "put"
+            if abs(wall_s2 - spot) / spot <= 0.005:
+                where = "right at the price"
+            elif wall_s2 < spot:
+                where = "below the price"
+            else:
+                where = "above the price"
+            nxt = "above" if s["side"] == "calls" else "below"
+            facts += (f" - the {wall_word} wall itself is at "
+                      f"${wall_s2:g}, {where}, so this is the next "
+                      f"big pile {nxt} it")
         if dte is None:
             decay = None
         elif dte <= 7:
