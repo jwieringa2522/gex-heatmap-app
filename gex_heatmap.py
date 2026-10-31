@@ -666,7 +666,7 @@ def render_html(d):
     parts.append(
         f"<div class='head'><div class='title'>GEX Heatmap - ${html_mod.escape(ticker)} "
         f"<span style='color:#8b94a3;font-weight:400;font-size:14px;'>${spot:,.2f}</span></div>"
-        f"<div class='sub'>Chain as of {html_mod.escape(d['as_of_ts'])} (CBOE delayed ~15 min)</div></div>"
+        f"<div class='sub'>Chain as of {html_mod.escape(d['as_of_ts'])} (CBOE - may be delayed)</div></div>"
     )
     stats = (
         "<div class='stats'>"

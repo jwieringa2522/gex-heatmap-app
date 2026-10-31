@@ -68,7 +68,7 @@ def render(d, png_path):
     ax.axis("off")
 
     # ---- header ----
-    ax.text(0.985, 0.965, f"Chain as of {d['as_of_ts']} (CBOE delayed ~15 min)",
+    ax.text(0.985, 0.965, f"Chain as of {d['as_of_ts']} (CBOE - may be delayed)",
             color=GRAY, fontsize=8.5, va="top", ha="right")
 
     renderer = fig.canvas.get_renderer()
