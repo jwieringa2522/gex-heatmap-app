@@ -182,6 +182,13 @@ or redistribution of Content is at the Operator's sole discretion. Sharing,
 reselling, screenshotting for distribution, or otherwise redistributing the
 Content or your access link will result in immediate removal without refund.
 
+For subscriptions purchased through the Spy Before You Buy website: the
+Monthly plan starts with a 7-day free trial, and a payment card is required
+to start it; cancel during the trial and you pay nothing. A first purchase
+is refundable within 7 days of the charge. Renewals and the Lifetime plan
+are final after that window. Cancelling stops future charges; access
+continues to the end of the paid or trial period.
+
 ## 16. FORWARD-LOOKING STATEMENTS
 
 The Content contains opinions, expectations, and forward-looking statements
