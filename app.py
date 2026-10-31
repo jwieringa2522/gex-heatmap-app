@@ -417,7 +417,7 @@ APP_PAGE = """<!DOCTYPE html>
     <div class="play" id="play"></div>
     <p class="fine" id="fine" style="display:none">Not financial advice. This tool is for educational purposes only - options trading involves substantial risk of loss. Always do your own research before making any trade.</p>
   </div>
-  <div class="foot">Options data delayed ~15 min (CBOE)<br>
+  <div class="foot">Options data may be delayed (CBOE)<br>
   More from <a href="https://x.com/spybef0rey0ubuy">@spybef0rey0ubuy</a></div>
 </div>
 <script>
