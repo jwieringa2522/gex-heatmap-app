@@ -1645,6 +1645,7 @@ def _gemini_answer(question: str) -> str | None:
             if attempt == 1:
                 time.sleep(1.5)
         if res is None:
+            _log_gemini_models_once()
             continue
         parts = (res.get("candidates", [{}])[0].get("content", {})
                  .get("parts", []))
@@ -1661,6 +1662,33 @@ def _gemini_answer(question: str) -> str | None:
         text = text.replace("—", "-").replace("–", "-")
         return text[:1200]
     return None
+
+
+_gemini_models_logged = False
+
+
+def _log_gemini_models_once():
+    """Diagnostic: when every Gemini attempt fails, log once per
+    process which models this key can actually call, so a retired or
+    renamed model id is visible in the app logs. Names only, no key."""
+    global _gemini_models_logged
+    if _gemini_models_logged or not GEMINI_API_KEY:
+        return
+    _gemini_models_logged = True
+    try:
+        req = urllib.request.Request(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            headers={"x-goog-api-key": GEMINI_API_KEY})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            res = json.loads(r.read())
+        names = [m.get("name", "?") for m in res.get("models", [])
+                 if "generateContent" in
+                 m.get("supportedGenerationMethods", [])]
+        print("[support-chat] gemini models available to this key: "
+              + ", ".join(names[:40]), flush=True)
+    except Exception as e:
+        print(f"[support-chat] gemini model list failed: "
+              f"{type(e).__name__}: {e}", flush=True)
 
 
 _support_hits: dict[str, list[float]] = {}
