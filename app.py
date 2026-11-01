@@ -1242,11 +1242,28 @@ _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
   After that window, renewals and Lifetime are final.
 - The core membership is the same on every full plan: private Telegram
   channel alerts (day, swing and options), the GEX heatmap app, the
-  pre-market Gamma Brief at 8:00 AM CT on trading days, the daily whale
-  scanner, custom TradingView indicators, and education material.
+  pre-market Gamma Brief, the daily whale scanner, custom TradingView
+  indicators, and education material.
   Yearly and Lifetime also add GEX Heatmaps PRO. Indicators Only is
   indicators only - no Telegram channel, alerts, GEX heatmaps, briefs
   or whale scanner.
+- Everything in the membership is built around stocks and options.
+  Crypto and forex signals are not part of the membership.
+- The alerts post live in the channel with the ticker, contract and
+  entry, positions are updated as they move, trims and full exits are
+  called in the channel, and there is an end-of-day recap of every
+  active trade.
+- The pre-market Gamma Brief covers SPY and QQQ: their ceiling and
+  floor levels before the bell, the anticipated moves for SPY and QQQ
+  on the day, and Justin's view for the day. It lands in the channel
+  at 8:00 AM CT on trading days.
+- The daily whale scanner posts one top call and one top put every
+  trading day. Every card shows the strike, expiry, volume and open
+  interest, the flow side (BID or ASK with the percent of volume), a
+  grade from A+ to F, and Justin's read.
+- Briefs and alerts are written in plain English, and the education
+  material (education, TA and account challenges) is beginner
+  friendly.
 - Indicators: the member indicators are invite-only TradingView scripts
   (Trend, Spy Daytrader / Spy Daytrader SHORT, CSP, Reversal - Long
   Daily Reversal is the daily driver). A free TradingView account can
@@ -1546,6 +1563,19 @@ def _scripted_answer(q: str) -> str | None:
                 "and the strikes in between. Heatmaps run through the "
                 "GEX app, which is for channel members.")
     # ---- misc FAQ ----
+    if has("crypto", "forex", "bitcoin") or phrase("currency pairs"):
+        return ("The membership is built around stocks and options - "
+                "the alerts, the Gamma Brief, the whale scanner and "
+                "the heatmaps all run on stocks and their options "
+                "chains. Crypto and forex signals are not part of it.")
+    if has("gamma") and has("spy", "qqq", "cover", "covers", "about",
+                             "ticker", "tickers", "include", "inside",
+                             "move", "moves"):
+        return ("The Gamma Brief covers SPY and QQQ - their ceiling "
+                "and floor levels before the bell, the anticipated "
+                "moves for both on the day, and my view for the day. "
+                "It lands in the channel at 8:00 AM CT on trading "
+                "days.")
     if has("beginner", "beginners") or phrase("over my head",
                                               "new to trading"):
         return ("No - briefs and alerts are in plain English, and the "
@@ -1642,8 +1672,8 @@ def _gemini_answer(question: str) -> str | None:
                     detail = ""
                 print(f"[support-chat] gemini {model} attempt {attempt} "
                       f"HTTP {e.code}: {detail}", flush=True)
-                if e.code not in (429, 500, 502, 503, 504):
-                    break  # a hard error (404 etc) will not heal
+                if e.code not in (500, 502, 503, 504):
+                    break  # 404/429 will not heal inside one request
             except Exception as e:
                 print(f"[support-chat] gemini {model} attempt {attempt} "
                       f"error: {type(e).__name__}: {e}", flush=True)
