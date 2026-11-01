@@ -1219,3 +1219,479 @@ def stripe_subs(key: str = ""):
             "stripe_subscription_id", "invite_link", "current_period_end",
             "updated_ts", "tv_username")
     return {"subs": [dict(zip(cols, r)) for r in rows]}
+
+
+# ---------- website support chatbot (POST /support-chat) ----------
+# Scripted intent core built from the site's own FAQ + Setup Guide and
+# the fixed plan facts. Off-script questions fall through to Google
+# Gemini (free tier) when GEMINI_API_KEY is set on Render; until then,
+# and whenever the AI is unsure or unreachable, the visitor gets the
+# support email. Every question the scripted core cannot answer is
+# logged to support_unanswered in usage.db so the script can grow.
+SUPPORT_EMAIL = "support@spybeforeyoubuytrading.com"
+_GEMINI_ENV_NAME = "GEMINI_" + "API_" + "KEY"
+GEMINI_API_KEY = os.environ.get(_GEMINI_ENV_NAME, "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+
+_SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
+- Plans (USD): Monthly $20/month, Quarterly $45/quarter, Yearly $150/year,
+  Lifetime $500 one payment, Indicators Only $10/month.
+- Monthly starts with a 7-day free trial. A card is required for the
+  trial, and the trial is one per person.
+- Refunds: full refund inside the first 7 days of a first purchase only.
+  After that window, renewals and Lifetime are final.
+- The core membership is the same on every full plan: private Telegram
+  channel alerts (day, swing and options), the GEX heatmap app, the
+  pre-market Gamma Brief at 8:00 AM CT on trading days, the daily whale
+  scanner, custom TradingView indicators, and education material.
+  Yearly and Lifetime also add GEX Heatmaps PRO. Indicators Only is
+  indicators only - no Telegram channel, alerts, GEX heatmaps, briefs
+  or whale scanner.
+- Indicators: the member indicators are invite-only TradingView scripts
+  (Trend, Spy Daytrader / Spy Daytrader SHORT, CSP, Reversal - Long
+  Daily Reversal is the daily driver). A free TradingView account can
+  view and use them. Alerts are different: TradingView counts indicator
+  alerts as technical alerts, the free plan includes none, so alerts
+  need a TradingView plan with technical alerts - Essential or above.
+- TradingView access is granted ONLY for the TradingView username the
+  subscriber enters at checkout, or later on the claim page at
+  https://gex.spybeforeyoubuytrading.com/tradingview (subscription
+  email + exact username). The indicators then appear in TradingView
+  under Indicators, then Invite-only scripts.
+- After subscribing on the site, the subscriber accepts a short
+  disclaimer and gets a personal one-time Telegram invite. The access
+  page is https://gex.spybeforeyoubuytrading.com/access
+- The GEX heatmap app is at https://gex.spybeforeyoubuytrading.com and
+  works on any phone, tablet or computer, but ONLY for members of the
+  private Telegram channel. Its download link is posted inside the
+  channel. It can build a heatmap for any ticker with an options chain.
+- Checkout is handled securely by Stripe. Subscriptions can be managed
+  or cancelled any time from the billing link; cancelling stops future
+  charges and access runs to the end of the paid period or trial.
+  Upgrading charges only the difference and takes effect right away;
+  downgrading takes effect at the end of the paid period; buying
+  Lifetime cancels the recurring plan.
+- Nothing on the site is financial advice. Everything is educational.
+- Support email: support@spybeforeyoubuytrading.com"""
+
+_GEMINI_SYSTEM = """You are the SpyBeforeYouBuy support bot - an automated
+support assistant on the SpyBeforeYouBuy website. You are not Justin and
+never claim to be him.
+
+Answer ONLY questions about SpyBeforeYouBuy: its plans, prices, the
+Telegram channel, the GEX heatmap app, the TradingView indicators, and
+how-to setup topics, using ONLY the facts below. Never invent prices,
+policies, statistics, features or links. Never give financial advice,
+trade calls or predictions.
+
+Keep the answer short and plain - a few sentences at most, short ordered
+steps when it is a how-to. Use plain hyphens only, never em dashes.
+
+If the question is not about SpyBeforeYouBuy, or the facts below do not
+cover it, or you are not sure, reply with exactly one word: UNSURE
+
+""" + _SUPPORT_FACTS
+
+_FALLBACK_ANSWER = ("I do not have a solid answer for that one. Email "
+                    f"{SUPPORT_EMAIL} and it will get looked at.")
+
+_PLANS_ANSWER = ("Plans (all USD): Monthly $20/month, Quarterly "
+                 "$45/quarter, Yearly $150/year, Lifetime $500 one "
+                 "payment, and Indicators Only $10/month.\n"
+                 "Monthly starts with a 7-day free trial (card required, "
+                 "one per person). Every full plan carries the same core "
+                 "membership - Yearly and Lifetime also add GEX Heatmaps "
+                 "PRO. Indicators Only is just the TradingView "
+                 "indicators, with no Telegram channel, alerts, GEX "
+                 "heatmaps, briefs or whale scanner.")
+
+_SETUP_ALERT_STEPS = ("To set an alert on the indicator:\n"
+                      "1. Open your chart and add the indicator.\n"
+                      "2. Hover the indicator line in the top-left "
+                      "legend, click the three dots, and choose Add "
+                      "alert on the indicator (on Long Daily Reversal "
+                      "it reads Add alert on LDR).\n"
+                      "3. Leave the condition set to the indicator "
+                      "itself, set the interval to 1D, and click "
+                      "Create.\n"
+                      "4. In Notifications, keep Notify in app on and "
+                      "tick Send email, then click Apply.\n"
+                      "The alert fires on both buys and exits. One alert "
+                      "covers one ticker on one chart, so repeat for "
+                      "each ticker. Alerts need a TradingView plan with "
+                      "technical alerts - Essential or above.")
+
+
+def _sq(q: str) -> str:
+    """Normalize a question for intent matching."""
+    return " " + re.sub(r"[^a-z0-9 ]", " ", q.lower()).strip() + " "
+
+
+def _scripted_answer(q: str) -> str | None:
+    """Intent-matched answers from the site FAQ, Setup Guide and fixed
+    facts. Ordered most specific first. None = scripted core has no
+    answer (goes to the AI layer / fallback, and gets logged)."""
+    n = _sq(q)
+    words = set(n.split())
+
+    def has(*ws):
+        return any((" " + w + " ") in n or w in words for w in ws)
+
+    def phrase(*ps):
+        return any(p in n for p in ps)
+
+    if len(words) <= 3 and has("hi", "hello", "hey"):
+        return ("Hi - I am the SpyBeforeYouBuy support bot. Ask me "
+                "about plans and prices, the free trial, TradingView "
+                "setup, alerts, refunds, or the GEX app.")
+    if phrase("financial advice"):
+        return ("No - everything here is educational: trades, levels "
+                "and market reads shared for learning. Options trading "
+                "is risky and you can lose money. The full risk "
+                "disclosure is at the bottom of the site page.")
+    if has("contact", "human", "phone") or phrase(
+            "real person", "your email", "support email", "email you",
+            "talk to someone"):
+        return (f"You can reach support at {SUPPORT_EMAIL}. For plan "
+                "or access questions, include the email you subscribed "
+                "with.")
+    if has("refund", "refunds") or phrase("money back"):
+        return ("Yes - on a first purchase. Ask within 7 days of the "
+                "charge and it is refunded in full. After that window, "
+                "renewals and Lifetime are final. Monthly also starts "
+                "with a 7-day free trial, so you can try everything "
+                "before ever being charged.")
+    if has("trial") or phrase("free week", "try it free", "try free"):
+        return ("Monthly starts with a 7-day free trial - card "
+                "required, one trial per person. You get everything in "
+                "the membership during the trial, and you can cancel "
+                "before the trial ends and never be charged. The other "
+                "plans are charged at checkout.")
+    if has("cancel", "cancelling", "cancellation"):
+        return ("Yes, you can cancel anytime from your billing link. "
+                "Cancelling stops future charges, and your access runs "
+                "to the end of the period you have paid for, or to the "
+                "end of your trial. A first purchase is refundable "
+                "within 7 days; renewals and Lifetime are final after "
+                "that window.")
+    if has("upgrade", "downgrade") or (
+            has("change", "switch") and has("plan", "plans")):
+        return ("Yes. Upgrading charges only the difference and takes "
+                "effect right away. Downgrading takes effect at the end "
+                "of your paid period. If you buy Lifetime, your "
+                "recurring plan is cancelled for you.")
+    if phrase("difference between") and has("plan", "plans"):
+        return ("The core membership is the same on every full plan, "
+                "and the difference is the billing period - longer "
+                "plans cost less per month. Yearly and Lifetime also "
+                "add GEX Heatmaps PRO. Indicators Only is separate: "
+                "just the TradingView indicators, nothing else.")
+    if phrase("indicators only"):
+        return ("Indicators Only is $10/month: the member TradingView "
+                "indicators (Trend, Spy Daytrader, CSP and Reversal) "
+                "as invite-only scripts, plus new indicators as they "
+                "are released. It does not include the Telegram "
+                "channel, alerts, GEX heatmaps, briefs or the whale "
+                "scanner.")
+    if has("included") or phrase("what do i get", "whats included",
+                                  "what is included", "what does the "
+                                  "membership"):
+        return ("Every full plan includes: day, swing and options "
+                "alerts in one private Telegram channel, the GEX "
+                "heatmap app for any ticker, the pre-market Gamma "
+                "Brief (8:00 AM CT on trading days), the daily whale "
+                "scanner, the custom TradingView indicators, and "
+                "education, TA and account challenges. Yearly and "
+                "Lifetime also add GEX Heatmaps PRO.")
+    if has("stocknewbs") or phrase("pro tier"):
+        return ("Every plan includes a free 3-month trial of the "
+                "Stocknewbs.com Pro Tier - Pro tier unlocked, no second "
+                "subscription needed.")
+    if phrase("need telegram") or (
+            has("telegram") and has("necessary", "required")):
+        return ("Yes - the alerts, the briefs and the heatmap access "
+                "all run through one private Telegram channel. "
+                "Telegram is free. If you do not have it yet, install "
+                "it first, then tap your invite link - the link stays "
+                "valid until you join.")
+    if has("telegram", "channel") and has(
+            "invite", "join", "access", "link", "get", "after"):
+        return ("Subscribe on the site, accept the short disclaimer, "
+                "and you are redirected to your personal one-time "
+                "Telegram invite - everything arrives in the private "
+                "channel. Your invite and member links also live on "
+                "the access page: "
+                "https://gex.spybeforeyoubuytrading.com/access")
+    if phrase("how do i pay", "how to pay") or has(
+            "stripe", "payment") or phrase("credit card", "debit card"):
+        return ("Checkout is handled securely by Stripe - your card "
+                "details never touch this site. Monthly starts with a "
+                "7-day free trial, card required. The other plans are "
+                "charged at checkout and renew automatically until you "
+                "cancel.")
+    # ---- TradingView guide flows ----
+    if has("verify") and has("email", "tradingview", "account"):
+        return ("TradingView emails you a verification link when you "
+                "sign up. Open your inbox, find that email, and click "
+                "the link to activate the account - then you can add "
+                "your username here.")
+    if has("username") and has(
+            "wrong", "skipped", "skip", "missed", "forgot", "change",
+            "fix", "typo", "incorrect"):
+        return ("No problem - use the claim page: enter the email you "
+                "subscribed with and your correct TradingView username, "
+                "and it gets fixed. Access is only switched on for "
+                "active subscribers: "
+                "https://gex.spybeforeyoubuytrading.com/tradingview")
+    if has("username") and has("find", "where", "what", "know"):
+        return ("Your exact TradingView username is in the profile "
+                "menu at the top left of TradingView. That exact "
+                "username is what goes in the username box at checkout "
+                "on this site - or on the claim page if you already "
+                "subscribed: "
+                "https://gex.spybeforeyoubuytrading.com/tradingview")
+    if phrase("sign up") and has("tradingview"):
+        return ("To get a free TradingView account:\n"
+                "1. Go to tradingview.com and click Get started for "
+                "free.\n"
+                "2. Start with the free plan - it is enough to view "
+                "and use the indicators.\n"
+                "3. Sign up with your email and a password, then click "
+                "Create account.\n"
+                "4. TradingView emails you a verification link - click "
+                "it to activate the account.\n"
+                "Then type your exact username into the username box "
+                "at checkout here (or add it later on the claim page).")
+    if has("tradingview") and phrase(
+            "no account", "dont have", "do not have", "haven t",
+            "not signed up"):
+        return ("No TradingView account yet is fine. Sign up free at "
+                "tradingview.com whenever you are ready (about a "
+                "minute), then add your username on the claim page so "
+                "your indicators can be switched on: "
+                "https://gex.spybeforeyoubuytrading.com/tradingview")
+    if has("invite") and has("only", "scripts", "script"):
+        return ("After your username is switched on: open a chart in "
+                "TradingView, click Indicators, open Invite-only "
+                "scripts, and pick the indicator. If it does not show "
+                "up, press F5 to refresh the page and open Indicators "
+                "again.")
+    if has("indicator", "indicators") and has(
+            "missing", "show", "showing", "find", "where", "see"):
+        return ("The indicators live in TradingView under Indicators, "
+                "then Invite-only scripts. If yours do not show up: "
+                "press F5 to refresh, then open Indicators again. "
+                "Still missing usually means the username on file is "
+                "not your exact TradingView username - fix it on the "
+                "claim page: "
+                "https://gex.spybeforeyoubuytrading.com/tradingview")
+    if has("alert", "alerts") and has(
+            "free", "paid", "essential", "need", "cost", "plan"):
+        return ("Viewing and using the indicators is free - no paid "
+                "TradingView plan needed for that. Alerts are "
+                "different: TradingView counts indicator alerts as "
+                "technical alerts, and the free plan includes none, so "
+                "alerts need a plan with technical alerts, Essential "
+                "or above.")
+    if has("alert", "alerts") and has(
+            "set", "create", "add", "make", "how", "get", "turn"):
+        return _SETUP_ALERT_STEPS
+    if has("tradingview") and has("paid", "pay", "essential", "free"):
+        return ("No paid TradingView plan is needed to view and use "
+                "the indicators - a free account covers that. The one "
+                "exception is alerts: TradingView counts indicator "
+                "alerts as technical alerts and the free plan includes "
+                "none, so alerts need Essential or above.")
+    if has("username") or phrase("tradingview name"):
+        return ("Your TradingView username is entered at checkout on "
+                "this site, or later on the claim page: "
+                "https://gex.spybeforeyoubuytrading.com/tradingview - "
+                "it is the only way TradingView access gets granted, "
+                "so use your exact username from the profile menu at "
+                "the top left of TradingView.")
+    if has("indicator", "indicators") and has(
+            "get", "receive", "access", "unlock", "have"):
+        return ("Join any plan, and at checkout type in your "
+                "TradingView username. The indicators are switched on "
+                "for that username, and you find them in TradingView "
+                "under Indicators, then Invite-only scripts. Every "
+                "plan includes them, even Indicators Only. Skipped the "
+                "box at checkout? Add your username any time on the "
+                "claim page: "
+                "https://gex.spybeforeyoubuytrading.com/tradingview")
+    # ---- GEX app + heatmap ----
+    if has("gex") or phrase("heatmap app", "download the app",
+                            "the app"):
+        return ("The GEX Heatmap App is at "
+                "https://gex.spybeforeyoubuytrading.com - it works on "
+                "any phone, tablet or computer, and builds a heatmap "
+                "for any ticker: the call wall, put wall and spot, "
+                "with a plain-English read. It only works for members "
+                "of the private Telegram channel - the download link "
+                "is posted inside the channel, and you log in with "
+                "your Telegram account.")
+    if has("heatmap", "heatmaps") and has("any", "which", "stock",
+                                          "ticker", "stocks"):
+        return ("Yes - any ticker with an options chain. You pick the "
+                "stock; the heatmap shows the call wall, the put wall "
+                "and the strikes in between. Heatmaps run through the "
+                "GEX app, which is for channel members.")
+    # ---- misc FAQ ----
+    if has("beginner", "beginners") or phrase("over my head",
+                                              "new to trading"):
+        return ("No - briefs and alerts are in plain English, and the "
+                "education material builds your process over time. The "
+                "channel is there to help traders improve and learn, "
+                "not just alerts.")
+    if has("often") or phrase("how often", "what time") or (
+            has("when") and has("alerts", "brief", "posts",
+                                "whale")):
+        return ("On trading days. The Gamma Brief lands in the "
+                "channel at 8:00 AM CT, before the bell. Day, swing "
+                "and options alerts post live as setups trigger, and "
+                "the whale scanner posts its top call and put every "
+                "trading day.")
+    if has("price", "prices", "pricing", "cost", "much") or phrase(
+            "how much", "what does it cost"):
+        return _PLANS_ANSWER
+    if has("plan", "plans", "subscription", "subscribe", "join",
+           "membership") and has("get", "access", "after", "how",
+                                 "want", "start"):
+        return ("Pick a plan on the site and check out - Monthly "
+                "starts with a 7-day free trial. After checkout you "
+                "accept a short disclaimer and get your personal "
+                "Telegram invite, and you enter your TradingView "
+                "username at checkout so the indicators can be "
+                "switched on. Prices: " + _PLANS_ANSWER.split(". ")[0]
+                + ".")
+    return None
+
+
+def _log_unanswered(question: str, via: str):
+    """Record a question the scripted core could not answer.
+
+    via = 'ai' when Gemini answered it, 'fallback' when the visitor
+    got the support-email fallback (no key, AI unsure, AI error)."""
+    try:
+        con = _db()
+        try:
+            con.execute("""CREATE TABLE IF NOT EXISTS support_unanswered
+                           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            ts REAL, question TEXT, via TEXT)""")
+            con.execute(
+                "INSERT INTO support_unanswered (ts, question, via) "
+                "VALUES (?,?,?)", (time.time(), question[:600], via))
+            con.commit()
+        finally:
+            con.close()
+    except Exception:
+        pass  # logging must never break the endpoint
+
+
+def _gemini_answer(question: str) -> str | None:
+    """AI layer for off-script questions. None = no key, API error, or
+    the model fenced itself off with UNSURE."""
+    if not GEMINI_API_KEY:
+        return None
+    payload = {
+        "system_instruction": {"parts": [{"text": _GEMINI_SYSTEM}]},
+        "contents": [{"parts": [{"text": question}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 320},
+    }
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{GEMINI_MODEL}:generateContent")
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json",
+                 "x-goog-api-key": GEMINI_API_KEY})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            res = json.loads(r.read())
+        parts = (res.get("candidates", [{}])[0].get("content", {})
+                 .get("parts", []))
+        text = " ".join(p.get("text", "") for p in parts).strip()
+    except Exception:
+        return None
+    if not text or text.upper().startswith("UNSURE"):
+        return None
+    # House rule: no em dashes in anything written for the site.
+    text = text.replace("—", "-").replace("–", "-")
+    return text[:1200]
+
+
+_support_hits: dict[str, list[float]] = {}
+
+
+def _support_rate_ok(ip: str) -> bool:
+    now = time.time()
+    hits = [t for t in _support_hits.get(ip, []) if now - t < 60]
+    if len(hits) >= 30:
+        _support_hits[ip] = hits
+        return False
+    hits.append(now)
+    _support_hits[ip] = hits
+    return True
+
+
+_SUPPORT_ORIGINS = {
+    "https://spybeforeyoubuytrading.com",
+    "https://www.spybeforeyoubuytrading.com",
+    "https://sbyb-staging.pages.dev",
+    "https://gex.spybeforeyoubuytrading.com",
+    "https://sbyb-gex-heatmap.onrender.com",
+}
+
+
+def _support_cors(request: Request) -> dict:
+    origin = request.headers.get("origin", "")
+    if origin in _SUPPORT_ORIGINS:
+        return {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
+    return {}
+
+
+@app.options("/support-chat")
+def support_chat_options(request: Request):
+    headers = _support_cors(request)
+    headers.update({
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "86400",
+    })
+    return JSONResponse({}, headers=headers)
+
+
+@app.post("/support-chat")
+async def support_chat(request: Request):
+    cors = _support_cors(request)
+    try:
+        body = json.loads((await request.body()) or b"{}")
+    except ValueError:
+        body = {}
+    question = str(body.get("question", "")).strip()[:600]
+    if not question:
+        return JSONResponse(
+            {"answer": "Type a question and I will answer it - plans, "
+                       "the free trial, TradingView setup, alerts, "
+                       "refunds, or the GEX app.",
+             "source": "script"},
+            headers=cors)
+    ip = request.client.host if request.client else "?"
+    if not _support_rate_ok(ip):
+        return JSONResponse(
+            {"answer": "One moment - too many questions at once. Wait "
+                       "a few seconds and ask again, or email "
+                       f"{SUPPORT_EMAIL}.",
+             "source": "rate"},
+            headers=cors)
+    answer = _scripted_answer(question)
+    if answer:
+        return JSONResponse({"answer": answer, "source": "script"},
+                            headers=cors)
+    ai = _gemini_answer(question)
+    if ai:
+        _log_unanswered(question, "ai")
+        return JSONResponse({"answer": ai, "source": "ai"},
+                            headers=cors)
+    _log_unanswered(question, "fallback")
+    return JSONResponse({"answer": _FALLBACK_ANSWER,
+                         "source": "fallback"}, headers=cors)
