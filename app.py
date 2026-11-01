@@ -1292,12 +1292,14 @@ _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
 - Support email: support@spybeforeyoubuytrading.com"""
 
 _GEMINI_SYSTEM = """You are SpyBeforeYouBuy Support, the support voice on
-the SpyBeforeYouBuy website. Present as SpyBeforeYouBuy Support - do not
-call yourself a bot in normal answers. You are not Justin and never
-claim to be him. Honesty floor: never claim to be a human person, and do
-not use a fake name or personal persona. If a visitor asks directly
-whether they are talking to a bot or an AI, answer honestly that you
-are an automated support assistant and offer the support email.
+the SpyBeforeYouBuy website. Write like a person on a support desk:
+truthful, plain and human in tone. Never describe yourself or your
+answers as an AI, a bot, automated, or generated, and never use a fake
+name or personal persona. You are not Justin and never claim to be him.
+If a visitor asks whether you are a bot or an AI, do not confirm it and
+do not claim to be a human person either - simply carry on as
+SpyBeforeYouBuy Support, offer to help with their question, and give
+the support email for anything you cannot sort out.
 
 Answer ONLY questions about SpyBeforeYouBuy: its plans, prices, the
 Telegram channel, the GEX heatmap app, the TradingView indicators, and
@@ -1370,10 +1372,11 @@ def _scripted_answer(q: str) -> str | None:
               "you a bot", "is this a bot", "is this ai",
               "am i talking to a bot", "talking to a bot",
               "talking to an ai", "are you a real person"):
-        return ("This is SpyBeforeYouBuy Support - I am an automated "
-                "support assistant, not a person. If you would rather "
-                f"reach a human, email {SUPPORT_EMAIL} and it will "
-                "get looked at.")
+        return ("You are through to SpyBeforeYouBuy Support - ask me "
+                "about plans and prices, the free trial, TradingView "
+                "setup, alerts, refunds, or the GEX app and I will get "
+                f"you sorted. For anything I cannot sort out here, "
+                f"email {SUPPORT_EMAIL}.")
     if phrase("financial advice"):
         return ("No - everything here is educational: trades, levels "
                 "and market reads shared for learning. Options trading "
@@ -1804,3 +1807,25 @@ async def support_chat(request: Request):
     _log_unanswered(question, "fallback")
     return JSONResponse({"answer": _FALLBACK_ANSWER,
                          "source": "fallback"}, headers=cors)
+
+
+@app.get("/support/unanswered")
+def support_unanswered(key: str = ""):
+    """Machine read for the support-chat learning loop. 404 unless the
+    shared key configured on Render matches - reveals nothing when
+    unconfigured, same guard as /stripe/subs."""
+    if not SITE_SUBS_READ_KEY or not hmac.compare_digest(
+            key, SITE_SUBS_READ_KEY):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS support_unanswered
+                       (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts REAL, question TEXT, via TEXT)""")
+        rows = con.execute(
+            "SELECT id, ts, question, via FROM support_unanswered "
+            "ORDER BY id").fetchall()
+    finally:
+        con.close()
+    return {"unanswered": [dict(zip(("id", "ts", "question", "via"), r))
+                           for r in rows]}
