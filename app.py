@@ -1610,32 +1610,41 @@ def _gemini_answer(question: str) -> str | None:
         "contents": [{"parts": [{"text": question}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 320},
     }
+    # Only gemini-3.8-flash is live for new keys (2.5/2.0 return 404 -
+    # retired). The free tier also throws temporary 503s and slow reads
+    # under demand spikes, so retry the live model before giving up.
     models = []
-    for m in (GEMINI_MODEL, "gemini-3.8-flash", "gemini-2.5-flash",
-              "gemini-2.0-flash"):
+    for m in (GEMINI_MODEL, "gemini-3.8-flash"):
         if m and m not in models:
             models.append(m)
     for model in models:
-        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{model}:generateContent")
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json",
-                     "x-goog-api-key": GEMINI_API_KEY})
-        try:
-            with urllib.request.urlopen(req, timeout=20) as r:
-                res = json.loads(r.read())
-        except urllib.error.HTTPError as e:
+        res = None
+        for attempt in (1, 2):
+            url = ("https://generativelanguage.googleapis.com/v1beta/"
+                   f"models/{model}:generateContent")
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json",
+                         "x-goog-api-key": GEMINI_API_KEY})
             try:
-                detail = e.read().decode("utf-8", "replace")[:200]
-            except Exception:
-                detail = ""
-            print(f"[support-chat] gemini {model} HTTP {e.code}: "
-                  f"{detail}", flush=True)
-            continue
-        except Exception as e:
-            print(f"[support-chat] gemini {model} error: "
-                  f"{type(e).__name__}: {e}", flush=True)
+                with urllib.request.urlopen(req, timeout=25) as r:
+                    res = json.loads(r.read())
+                break
+            except urllib.error.HTTPError as e:
+                try:
+                    detail = e.read().decode("utf-8", "replace")[:200]
+                except Exception:
+                    detail = ""
+                print(f"[support-chat] gemini {model} attempt {attempt} "
+                      f"HTTP {e.code}: {detail}", flush=True)
+                if e.code not in (429, 500, 502, 503, 504):
+                    break  # a hard error (404 etc) will not heal
+            except Exception as e:
+                print(f"[support-chat] gemini {model} attempt {attempt} "
+                      f"error: {type(e).__name__}: {e}", flush=True)
+            if attempt == 1:
+                time.sleep(1.5)
+        if res is None:
             continue
         parts = (res.get("candidates", [{}])[0].get("content", {})
                  .get("parts", []))
