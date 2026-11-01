@@ -803,7 +803,7 @@ try:
     STRIPE_PLAN_MAP = json.loads(os.environ.get("STRIPE_PLAN_MAP", "{}"))
 except Exception:
     STRIPE_PLAN_MAP = {}
-GATE_BASE = PUBLIC_URL or "https://sbyb-gex-heatmap.onrender.com"
+GATE_BASE = PUBLIC_URL or "https://gex.spybeforeyoubuytrading.com"
 IO_PLAN = "Indicators Only"  # TradingView access only - never Telegram
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PORTAL_URL = os.environ.get("STRIPE_PORTAL_URL", "")
