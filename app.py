@@ -1403,10 +1403,6 @@ def _scripted_answer(q: str) -> str | None:
                 "scanner, the custom TradingView indicators, and "
                 "education, TA and account challenges. Yearly and "
                 "Lifetime also add GEX Heatmaps PRO.")
-    if has("stocknewbs") or phrase("pro tier"):
-        return ("Every plan includes a free 3-month trial of the "
-                "Stocknewbs.com Pro Tier - Pro tier unlocked, no second "
-                "subscription needed.")
     if phrase("need telegram") or (
             has("telegram") and has("necessary", "required")):
         return ("Yes - the alerts, the briefs and the heatmap access "
