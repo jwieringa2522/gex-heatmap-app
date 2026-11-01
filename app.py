@@ -1613,13 +1613,18 @@ def _gemini_answer(question: str) -> str | None:
     # Only gemini-3.8-flash is live for new keys (2.5/2.0 return 404 -
     # retired). The free tier also throws temporary 503s and slow reads
     # under demand spikes, so retry the live model before giving up.
+    # Model portfolio from this key's own ListModels (Nov 1): when the
+    # flagship pool is overloaded (503) or rate-limited (429), fail
+    # over across the other live flash pools instead of giving up.
     models = []
-    for m in (GEMINI_MODEL, "gemini-3.8-flash"):
+    for m in (GEMINI_MODEL, "gemini-3.8-flash", "gemini-flash-latest",
+              "gemini-3.5-flash", "gemini-3.7-flash",
+              "gemini-flash-lite-latest"):
         if m and m not in models:
             models.append(m)
     for model in models:
         res = None
-        for attempt in (1, 2):
+        for attempt in ((1, 2) if model == models[0] else (1,)):
             url = ("https://generativelanguage.googleapis.com/v1beta/"
                    f"models/{model}:generateContent")
             req = urllib.request.Request(
@@ -1627,7 +1632,7 @@ def _gemini_answer(question: str) -> str | None:
                 headers={"Content-Type": "application/json",
                          "x-goog-api-key": GEMINI_API_KEY})
             try:
-                with urllib.request.urlopen(req, timeout=25) as r:
+                with urllib.request.urlopen(req, timeout=15) as r:
                     res = json.loads(r.read())
                 break
             except urllib.error.HTTPError as e:
