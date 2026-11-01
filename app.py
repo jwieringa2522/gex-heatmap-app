@@ -1638,7 +1638,8 @@ def _gemini_answer(question: str) -> str | None:
     payload = {
         "system_instruction": {"parts": [{"text": _GEMINI_SYSTEM}]},
         "contents": [{"parts": [{"text": question}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 320},
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 500,
+                             "thinkingConfig": {"thinkingBudget": 0}},
     }
     # Only gemini-3.8-flash is live for new keys (2.5/2.0 return 404 -
     # retired). The free tier also throws temporary 503s and slow reads
