@@ -1231,7 +1231,7 @@ def stripe_subs(key: str = ""):
 SUPPORT_EMAIL = "support@spybeforeyoubuytrading.com"
 _GEMINI_ENV_NAME = "GEMINI_" + "API_" + "KEY"
 GEMINI_API_KEY = os.environ.get(_GEMINI_ENV_NAME, "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
 _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
 - Plans (USD): Monthly $20/month, Quarterly $45/quarter, Yearly $150/year,
@@ -1611,7 +1611,8 @@ def _gemini_answer(question: str) -> str | None:
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 320},
     }
     models = []
-    for m in (GEMINI_MODEL, "gemini-2.5-flash", "gemini-2.0-flash"):
+    for m in (GEMINI_MODEL, "gemini-3.8-flash", "gemini-2.5-flash",
+              "gemini-2.0-flash"):
         if m and m not in models:
             models.append(m)
     for model in models:
