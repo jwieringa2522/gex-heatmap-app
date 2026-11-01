@@ -1231,7 +1231,7 @@ def stripe_subs(key: str = ""):
 SUPPORT_EMAIL = "support@spybeforeyoubuytrading.com"
 _GEMINI_ENV_NAME = "GEMINI_" + "API_" + "KEY"
 GEMINI_API_KEY = os.environ.get(_GEMINI_ENV_NAME, "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
 - Plans (USD): Monthly $20/month, Quarterly $45/quarter, Yearly $150/year,
@@ -1599,33 +1599,58 @@ def _log_unanswered(question: str, via: str):
 
 def _gemini_answer(question: str) -> str | None:
     """AI layer for off-script questions. None = no key, API error, or
-    the model fenced itself off with UNSURE."""
+    the model fenced itself off with UNSURE. Tries the configured model
+    then the known-good free-tier ids, and logs the real failure reason
+    (never the key) so a dead layer is diagnosable from the app logs."""
     if not GEMINI_API_KEY:
+        print("[support-chat] gemini skipped: no key in env", flush=True)
         return None
     payload = {
         "system_instruction": {"parts": [{"text": _GEMINI_SYSTEM}]},
         "contents": [{"parts": [{"text": question}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 320},
     }
-    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{GEMINI_MODEL}:generateContent")
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json",
-                 "x-goog-api-key": GEMINI_API_KEY})
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            res = json.loads(r.read())
+    models = []
+    for m in (GEMINI_MODEL, "gemini-2.5-flash", "gemini-2.0-flash"):
+        if m and m not in models:
+            models.append(m)
+    for model in models:
+        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{model}:generateContent")
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json",
+                     "x-goog-api-key": GEMINI_API_KEY})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                res = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read().decode("utf-8", "replace")[:200]
+            except Exception:
+                detail = ""
+            print(f"[support-chat] gemini {model} HTTP {e.code}: "
+                  f"{detail}", flush=True)
+            continue
+        except Exception as e:
+            print(f"[support-chat] gemini {model} error: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            continue
         parts = (res.get("candidates", [{}])[0].get("content", {})
                  .get("parts", []))
         text = " ".join(p.get("text", "") for p in parts).strip()
-    except Exception:
-        return None
-    if not text or text.upper().startswith("UNSURE"):
-        return None
-    # House rule: no em dashes in anything written for the site.
-    text = text.replace("—", "-").replace("–", "-")
-    return text[:1200]
+        if not text:
+            print(f"[support-chat] gemini {model} empty response: "
+                  f"{json.dumps(res)[:200]}", flush=True)
+            continue
+        if text.upper().startswith("UNSURE"):
+            print(f"[support-chat] gemini {model} fenced: UNSURE",
+                  flush=True)
+            return None
+        # House rule: no em dashes in anything written for the site.
+        text = text.replace("—", "-").replace("–", "-")
+        return text[:1200]
+    return None
 
 
 _support_hits: dict[str, list[float]] = {}
@@ -1676,7 +1701,8 @@ async def support_chat(request: Request):
         body = json.loads((await request.body()) or b"{}")
     except ValueError:
         body = {}
-    question = str(body.get("question", "")).strip()[:600]
+    question = str(body.get("question") or body.get("message")
+                   or "").strip()[:600]
     if not question:
         return JSONResponse(
             {"answer": "Type a question and I will answer it - plans, "
