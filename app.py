@@ -1345,9 +1345,9 @@ def _scripted_answer(q: str) -> str | None:
         return any(p in n for p in ps)
 
     if len(words) <= 3 and has("hi", "hello", "hey"):
-        return ("Hi - this is SpyBeforeYouBuy Support. Ask me about "
-                "plans and prices, the free trial, TradingView setup, "
-                "alerts, refunds, or the GEX app.")
+        return ("Hi there. Questions about plans and prices, the "
+                "free trial, TradingView setup, alerts, refunds, or "
+                "the GEX app? Ask away - I will get you sorted.")
     if phrase("are you a bot", "are you a robot", "are you ai",
               "are you an ai", "are you human",
               "you a bot", "is this a bot", "is this ai",
