@@ -1447,7 +1447,6 @@ Your indicators appear in TradingView under Indicators, then Invite-only scripts
 
 Questions? Reply to this email or write to {SUPPORT_EMAIL} and I will get you sorted.
 
-- Justin
 SpyBeforeYouBuy"""
         return WELCOME_SUBJECT, body
     code = (sub.get("invite_link") or "").split("https://t.me/+", 1)[-1]
@@ -1467,7 +1466,6 @@ Your indicators appear in TradingView under Indicators, then Invite-only scripts
 
 Questions? Reply to this email or write to {SUPPORT_EMAIL} and I will get you sorted.
 
-- Justin
 SpyBeforeYouBuy"""
     return WELCOME_SUBJECT, body
 
