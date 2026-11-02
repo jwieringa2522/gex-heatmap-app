@@ -1838,17 +1838,32 @@ def _self_heal_subs():
             if not page.get("has_more") or not data:
                 break
             cursor = data[-1].get("id")
+        # One row per email, but a customer can have several
+        # subscriptions over time (an old canceled test sub and a
+        # live one share this email in production). Pick ONE winner
+        # per email before upserting: a live status always beats a
+        # dead one, then the newest created wins. Upserting in list
+        # order let a canceled sub overwrite the live row on the
+        # first self-heal run (Nov 1 2026) - never again.
+        live_states = ("trialing", "active", "past_due")
+        winners = {}
+        for sub in subs:
+            customer = sub.get("customer") or {}
+            if not isinstance(customer, dict):
+                continue
+            email = (customer.get("email") or "").strip().lower()
+            if not email:
+                continue
+            rank = (1 if sub.get("status") in live_states else 0,
+                    sub.get("created") or 0)
+            if email not in winners or rank > winners[email][0]:
+                winners[email] = (rank, sub)
         now = time.time()
         healed = 0
         con = _subs_db()
         try:
-            for sub in subs:
+            for email, (_rank, sub) in winners.items():
                 customer = sub.get("customer") or {}
-                if not isinstance(customer, dict):
-                    continue
-                email = (customer.get("email") or "").strip().lower()
-                if not email:
-                    continue
                 items = (sub.get("items") or {}).get("data") or []
                 price = (items[0].get("price") or {}) if items else {}
                 plan = ((sub.get("metadata") or {}).get("plan")
@@ -1882,16 +1897,14 @@ def _self_heal_subs():
                      None))
                 healed += 1
             con.commit()
-            for sub in subs:
-                customer = sub.get("customer") or {}
-                if isinstance(customer, dict) and customer.get("email"):
-                    _ensure_invite(
-                        con, customer["email"].strip().lower())
+            for email in winners:
+                _ensure_invite(con, email)
             con.commit()
         finally:
             con.close()
         print(f"[stripe] self-heal: {len(subs)} subscriptions seen, "
-              f"{healed} rows upserted", flush=True)
+              f"{len(winners)} unique emails, {healed} rows upserted",
+              flush=True)
     except Exception as e:
         print(f"[stripe] self-heal failed: {e}", flush=True)
 
