@@ -1421,6 +1421,15 @@ def _resend_send(to_email: str, subject: str, text: str) -> bool:
         req.add_header("Content-Type", "application/json")
         urllib.request.urlopen(req, timeout=20).read()
         return True
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        print(f"[email] Resend send failed for {to_email}: {e} | {detail}",
+              flush=True)
+        return False
     except Exception as e:
         print(f"[email] Resend send failed for {to_email}: {e}",
               flush=True)
