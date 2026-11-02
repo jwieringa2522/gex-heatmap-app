@@ -232,65 +232,34 @@ def render(d, png_path):
     rect(n_cols - 1, cy, color)
     text(n_cols - 1, cy, _fmt_cell(grand), color=fg, weight=700)
 
-    # ---- level lines: true spot + zero-gamma flip ----
-    def _y_for_price(p):
-        # Y at a price's true height: linear-interpolated between the
-        # centers of the two displayed strike rows that bracket it.
-        # None when the price sits outside the displayed strike range.
-        for i in range(len(strikes) - 1):
-            hi_s, lo_s = strikes[i], strikes[i + 1]
-            if lo_s <= p <= hi_s:
-                if hi_s == lo_s:
-                    return ty1 - (i + 1.5) * chgt
-                f = (p - lo_s) / (hi_s - lo_s)
-                return ty1 - (i + 2.5) * chgt + f * chgt
-        if len(strikes) == 1 and p == strikes[0]:
-            return ty1 - 1.5 * chgt
-        return None
-
-    # True spot line: a thin white line at the price's real height.
-    # Skipped when a displayed strike already sits within a few cents
-    # of spot - the white spot label cell marks that level and a line
-    # would only double-mark it.
-    if abs(strikes[spot_i] - spot) > 0.05:
-        _sy = _y_for_price(spot)
-        if _sy is not None:
-            ax.plot([tx0, tx1], [_sy, _sy], color=WHITE, lw=1.1,
-                    alpha=0.85, zorder=4)
-
-    # Gamma flip: dashed teal line at the level's true height, tag at
-    # the LEFT end beside the strike number of the row the line passes
-    # through - the same spot the wall tags use (a right-edge tag
-    # covered that row's Total value). The tag is kept only if its
-    # measured box stays inside the label column and clears every
-    # strike number and wall tag; otherwise no tag is drawn and the
-    # stats strip value + legend clause still identify the line.
-    # Line drawn only when the level falls inside the displayed
-    # strikes; when there is no flip on the chain, nothing is drawn.
-    flip_drawn = False
+    # Gamma flip tag: no line is drawn across the table (Justin's
+    # order, Nov 2). When a flip exists inside the displayed strike
+    # range, a small "FLIP" tag marks it in the strike-label column
+    # of the nearest strike row, beside the strike number - the same
+    # open area the CALL WALL / PUT WALL tags use. The tag is kept
+    # only if its measured box stays inside the label column and
+    # clears every strike number and wall tag; otherwise no tag is
+    # drawn and the stats strip value still discloses the level.
+    flip_tag_drawn = False
     flip = d.get("gamma_flip")
-    if flip is not None:
-        _fy = _y_for_price(flip)
-        if _fy is not None:
-            ax.plot([tx0, tx1], [_fy, _fy], color=TEAL, lw=1.4,
-                    linestyle=(0, (4, 2)), zorder=4)
-            flip_drawn = True
-            _ic = min(max(int((ty1 - _fy) / chgt) - 1, 0),
-                      len(strikes) - 1)
-            tflip = ax.text(num_right[_ic] + 0.006, _fy, "GAMMA FLIP",
-                            color=TEALLT, fontsize=7, weight=800,
-                            va="center", ha="left", zorder=6,
-                            bbox=dict(facecolor=BG, edgecolor="none",
-                                      pad=1.4))
-            _fb = tflip.get_window_extent(renderer=renderer)
-            _fx0, _fx1 = _fb.x0 / fig_w_px, _fb.x1 / fig_w_px
-            _fy0, _fy1 = _fb.y0 / fig_h_px, _fb.y1 / fig_h_px
-            _clear = _fx1 <= tx0 + lab_w and all(
-                _fx1 <= ox0 or ox1 <= _fx0 or
-                _fy1 <= oy0 or oy1 <= _fy0
-                for ox0, oy0, ox1, oy1 in label_obstacles)
-            if not _clear:
-                tflip.remove()
+    if flip is not None and strikes and strikes[-1] <= flip <= strikes[0]:
+        _fi = min(range(len(strikes)),
+                  key=lambda i: abs(strikes[i] - flip))
+        tflip = ax.text(num_right[_fi] + 0.006,
+                        ty1 - (_fi + 1.5) * chgt, "FLIP",
+                        color=TEALLT, fontsize=7, weight=800,
+                        va="center", ha="left")
+        _fb = tflip.get_window_extent(renderer=renderer)
+        _fx0, _fx1 = _fb.x0 / fig_w_px, _fb.x1 / fig_w_px
+        _fy0, _fy1 = _fb.y0 / fig_h_px, _fb.y1 / fig_h_px
+        _clear = _fx1 <= tx0 + lab_w and all(
+            _fx1 <= ox0 or ox1 <= _fx0 or
+            _fy1 <= oy0 or oy1 <= _fy0
+            for ox0, oy0, ox1, oy1 in label_obstacles)
+        if _clear:
+            flip_tag_drawn = True
+        else:
+            tflip.remove()
 
     # White outline on the biggest single strike x expiry cell -
     # drawn on top of any standout fill it may coincide with.
@@ -311,8 +280,8 @@ def render(d, png_path):
         _leg2.append(f"White outline: biggest single pile, "
                      f"{_val} at the "
                      f"\\${_big['strike']:g} strike / {_bl} expiry")
-    if flip_drawn:
-        _leg2.append("Teal dashed line: gamma flip")
+    if flip_tag_drawn:
+        _leg2.append("Teal FLIP tag: gamma flip")
     ax.text(0.015, 0.048 if _leg2 else 0.028,
             "Green = positive (call) gamma exposure  \u00b7  "
             "Red = negative (put) gamma exposure  \u00b7  "
