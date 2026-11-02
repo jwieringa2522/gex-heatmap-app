@@ -1400,7 +1400,8 @@ WELCOME_FROM = "SpyBeforeYouBuy <support@spybeforeyoubuytrading.com>"
 WELCOME_SUBJECT = "Your SpyBeforeYouBuy access is ready"
 
 
-def _resend_send(to_email: str, subject: str, text: str) -> bool:
+def _resend_send(to_email: str, subject: str, text: str,
+                 headers: dict | None = None) -> bool:
     """Send one email through Resend from the support@ identity
     (domain-authenticated, so it does not land in spam like the old
     personal-Gmail sends). True on success; failures are logged."""
@@ -1413,8 +1414,11 @@ def _resend_send(to_email: str, subject: str, text: str) -> bool:
               flush=True)
         return False
     try:
-        body = json.dumps({"from": WELCOME_FROM, "to": [to_email],
-                           "subject": subject, "text": text}).encode()
+        payload = {"from": WELCOME_FROM, "to": [to_email],
+                   "subject": subject, "text": text}
+        if headers:
+            payload["headers"] = headers
+        body = json.dumps(payload).encode()
         req = urllib.request.Request(
             "https://api.resend.com/emails", data=body, method="POST")
         req.add_header("Authorization", f"Bearer {RESEND_API_KEY}")
@@ -1549,6 +1553,34 @@ def email_test_welcome(payload: dict, key: str = ""):
         {"plan": row[0], "status": row[1], "invite_link": row[2]})
     ok = _resend_send(email, "[TEST] " + subject, body)
     return {"sent": ok, "to": email, "from": WELCOME_FROM}
+
+
+@app.post("/email/send")
+def email_send(payload: dict, key: str = ""):
+    """Keyed: send one support email from the support@ identity via
+    Resend. The support inbox watcher uses this to answer customer
+    mail as SpyBeforeYouBuy. Optional in_reply_to (an RFC Message-ID,
+    with or without angle brackets) sets threading headers so the
+    reply lands in the customer's thread."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    to = (payload.get("to") or "").strip()
+    subject = (payload.get("subject") or "").strip()
+    text = payload.get("text") or ""
+    if not to or "@" not in to or not subject or not text.strip():
+        return JSONResponse(
+            {"detail": "to, subject and text required"}, status_code=400)
+    if len(subject) > 300 or len(text) > 20000:
+        return JSONResponse({"detail": "too long"}, status_code=400)
+    headers = None
+    irt = (payload.get("in_reply_to") or "").strip()
+    if irt:
+        mid = irt if irt.startswith("<") else f"<{irt}>"
+        headers = {"In-Reply-To": mid, "References": mid}
+    ok = _resend_send(to, subject, text, headers)
+    print(f"[email] support send to {to}: {subject!r} -> "
+          f"{'ok' if ok else 'FAILED'}", flush=True)
+    return {"sent": ok, "to": to, "from": WELCOME_FROM}
 
 
 @app.post("/stripe/restore-sub")
