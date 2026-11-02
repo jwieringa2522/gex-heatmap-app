@@ -1706,6 +1706,104 @@ def stripe_rebuild_from_session(payload: dict, key: str = ""):
     return dict(zip(cols, row))
 
 
+def _stripe_get(path: str) -> dict:
+    req = urllib.request.Request(f"https://api.stripe.com/v1/{path}")
+    req.add_header("Authorization", f"Bearer {STRIPE_SECRET_KEY}")
+    return json.loads(urllib.request.urlopen(req, timeout=20).read())
+
+
+@app.post("/stripe/rebuild-from-email")
+def stripe_rebuild_from_email(payload: dict, key: str = ""):
+    """Keyed recovery, second path: rebuild a subscriber row from
+    the customer's live Stripe subscription when the checkout
+    session itself cannot be read through the restricted key
+    (sessions returned 404 for the app key on Nov 1 2026 while
+    customers/subscriptions read fine). Keeps the checkout session
+    id the caller passes (it is what /access resolves on), takes
+    plan/status/period end from the subscription, and mints the
+    Telegram invite. The TradingView username lives only on the
+    session, so it stays for the claim page. Same key guard."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    email = (payload.get("email") or "").strip().lower()
+    session_id = (payload.get("session_id") or "").strip() or None
+    if not email:
+        return JSONResponse({"detail": "email required"}, status_code=400)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    try:
+        customers = _stripe_get(
+            f"customers?email={urllib.parse.quote(email)}&limit=10"
+        ).get("data") or []
+        if not customers:
+            return JSONResponse({"detail": "no such customer"},
+                                status_code=404)
+        customer = max(customers, key=lambda c: c.get("created") or 0)
+        subs = _stripe_get(
+            f"subscriptions?customer={customer['id']}&status=all&limit=10"
+        ).get("data") or []
+        live = [s for s in subs
+                if s.get("status") in ("active", "trialing", "past_due")]
+        if not live:
+            return JSONResponse({"detail": "no live subscription"},
+                                status_code=404)
+        sub = max(live, key=lambda s: s.get("created") or 0)
+    except Exception as e:
+        print(f"[stripe] rebuild-from-email fetch failed for "
+              f"{email}: {e}", flush=True)
+        return JSONResponse({"detail": "stripe fetch failed"},
+                            status_code=502)
+    items = (sub.get("items") or {}).get("data") or []
+    price = (items[0].get("price") or {}) if items else {}
+    plan = ((sub.get("metadata") or {}).get("plan")
+            or STRIPE_PLAN_MAP.get(price.get("id") or "")
+            or STRIPE_PLAN_MAP.get(str(price.get("unit_amount") or ""))
+            or "Membership")
+    period_end = sub.get("current_period_end") or (
+        items[0].get("current_period_end") if items else None)
+    now = time.time()
+    con = _subs_db()
+    try:
+        con.execute(
+            """INSERT INTO site_subs(email, plan, status,
+                   stripe_customer_id, stripe_subscription_id,
+                   checkout_session_id, invite_link, current_period_end,
+                   created_ts, updated_ts, tv_username)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(email) DO UPDATE SET
+                 plan=excluded.plan, status=excluded.status,
+                 stripe_customer_id=excluded.stripe_customer_id,
+                 stripe_subscription_id=excluded.stripe_subscription_id,
+                 checkout_session_id=COALESCE(
+                     excluded.checkout_session_id,
+                     site_subs.checkout_session_id),
+                 current_period_end=COALESCE(
+                     excluded.current_period_end,
+                     site_subs.current_period_end),
+                 updated_ts=excluded.updated_ts""",
+            (email, plan, sub.get("status"), customer["id"], sub["id"],
+             session_id, None, period_end, now, now, None))
+        con.commit()
+        invite = _ensure_invite(con, email)
+        con.commit()
+        row = con.execute(
+            """SELECT email, plan, status, stripe_customer_id,
+                      stripe_subscription_id, checkout_session_id,
+                      invite_link, current_period_end, tv_username,
+                      welcome_sent_ts
+               FROM site_subs WHERE email=?""", (email,)).fetchone()
+    finally:
+        con.close()
+    print(f"[stripe] rebuilt from email: {email} plan={plan} "
+          f"status={sub.get('status')} sub={sub['id']} "
+          f"invite={'yes' if invite else 'NO'}", flush=True)
+    cols = ("email", "plan", "status", "stripe_customer_id",
+            "stripe_subscription_id", "checkout_session_id", "invite_link",
+            "current_period_end", "tv_username", "welcome_sent_ts")
+    return dict(zip(cols, row))
+
+
 # ---------- website support chatbot (POST /support-chat) ----------
 # Scripted intent core built from the site's own FAQ + Setup Guide and
 # the fixed plan facts. Off-script questions fall through to Google
