@@ -1653,6 +1653,59 @@ def stripe_delete_sub(payload: dict, key: str = ""):
     return {"email": email, "deleted": True}
 
 
+@app.post("/stripe/rebuild-from-session")
+def stripe_rebuild_from_session(payload: dict, key: str = ""):
+    """Keyed recovery: rebuild a subscriber row from a Stripe
+    checkout session id. The app database resets on every redeploy,
+    and a checkout processed by the old instance seconds before a
+    deploy is lost with it (Nov 1 2026: a live retest record died
+    exactly this way). This re-fetches the session from Stripe and
+    runs the normal checkout-completed handler on it, restoring the
+    full row - plan, status, period end, TradingView username - and
+    minting a fresh Telegram invite. Same key guard as /stripe/subs."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    session_id = (payload.get("session_id") or "").strip()
+    if not session_id.startswith("cs_"):
+        return JSONResponse({"detail": "session_id required"},
+                            status_code=400)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    try:
+        req = urllib.request.Request(
+            f"https://api.stripe.com/v1/checkout/sessions/{session_id}")
+        req.add_header("Authorization", f"Bearer {STRIPE_SECRET_KEY}")
+        session = json.loads(
+            urllib.request.urlopen(req, timeout=20).read())
+    except Exception as e:
+        print(f"[stripe] rebuild fetch failed for {session_id}: {e}",
+              flush=True)
+        return JSONResponse({"detail": "stripe fetch failed"},
+                            status_code=502)
+    con = _subs_db()
+    try:
+        _on_checkout_completed(con, session)
+        con.commit()
+        email = ((session.get("customer_details") or {}).get("email")
+                 or session.get("customer_email") or "").strip().lower()
+        row = con.execute(
+            """SELECT email, plan, status, stripe_customer_id,
+                      stripe_subscription_id, checkout_session_id,
+                      invite_link, current_period_end, tv_username,
+                      welcome_sent_ts
+               FROM site_subs WHERE email=?""", (email,)).fetchone()
+    finally:
+        con.close()
+    if not row:
+        return JSONResponse({"detail": "no row after rebuild"},
+                            status_code=500)
+    cols = ("email", "plan", "status", "stripe_customer_id",
+            "stripe_subscription_id", "checkout_session_id", "invite_link",
+            "current_period_end", "tv_username", "welcome_sent_ts")
+    return dict(zip(cols, row))
+
+
 # ---------- website support chatbot (POST /support-chat) ----------
 # Scripted intent core built from the site's own FAQ + Setup Guide and
 # the fixed plan facts. Off-script questions fall through to Google
