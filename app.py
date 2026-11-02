@@ -1419,6 +1419,14 @@ def _resend_send(to_email: str, subject: str, text: str) -> bool:
             "https://api.resend.com/emails", data=body, method="POST")
         req.add_header("Authorization", f"Bearer {RESEND_API_KEY}")
         req.add_header("Content-Type", "application/json")
+        # api.resend.com sits behind Cloudflare, which 403s the
+        # default Python-urllib signature (error code 1010) before
+        # the request ever reaches Resend - send a normal UA.
+        req.add_header("User-Agent",
+                       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/130.0 Safari/537.36")
+        req.add_header("Accept", "application/json")
         urllib.request.urlopen(req, timeout=20).read()
         return True
     except urllib.error.HTTPError as e:
