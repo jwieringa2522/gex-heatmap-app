@@ -2077,6 +2077,11 @@ _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
   on by hand, so they can take up to 24 hours to appear after the
   username is entered; if they are not there after 24 hours, the
   subscriber should email support.
+- Long Daily Reversal clean chart: after adding Long Daily Reversal,
+  click its gear icon, open the Style tab, and untick Trades on
+  chart, Signal labels and Quantity. TradingView turns those on by
+  default for strategy scripts and it cannot be preset, so this
+  one-step cleanup is how the chart stays clean.
 - After subscribing on the site, the subscriber accepts a short
   disclaimer and gets a personal one-time Telegram invite. The access
   page is https://gex.spybeforeyoubuytrading.com/access
@@ -2301,12 +2306,24 @@ def _scripted_answer(q: str) -> str | None:
                 "minute), then add your username on the claim page so "
                 "your indicators can be switched on: "
                 "https://gex.spybeforeyoubuytrading.com/tradingview")
+    if (phrase("long daily reversal") or has("ldr")) \
+            and not has("alert"):
+        return ("Add Long Daily Reversal from Indicators, then "
+                "Invite-only scripts. After adding Long Daily "
+                "Reversal, click its gear icon, open the Style tab, "
+                "and untick Trades on chart, Signal labels and "
+                "Quantity. TradingView turns those on by default for "
+                "strategy scripts and it cannot be preset - unticking "
+                "them keeps the chart clean.")
     if has("invite") and has("only", "scripts", "script"):
         return ("After your username is switched on: open a chart in "
                 "TradingView, click Indicators, open Invite-only "
                 "scripts, and pick the indicator. If it does not show "
                 "up, press F5 to refresh the page and open Indicators "
-                "again.")
+                "again. For Long Daily Reversal: after adding it, "
+                "click its gear icon, open the Style tab, and untick "
+                "Trades on chart, Signal labels and Quantity - that "
+                "keeps the chart clean.")
     if has("indicator", "indicators") and has(
             "missing", "show", "showing", "find", "where", "see"):
         return ("The indicators live in TradingView under Indicators, "
