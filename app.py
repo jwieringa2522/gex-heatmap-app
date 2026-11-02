@@ -1551,7 +1551,8 @@ def _welcome_compose(sub: dict) -> tuple[str, str]:
     plan = sub.get("plan") or "Membership"
     status = sub.get("status") or ""
     trial = ("\nYour 7-day free trial has started. Your card is only "
-             "charged if you stay past the trial."
+             "charged if you stay past the trial. The free trial is "
+             "one per person, ever."
              if status == "trialing" else "")
     if plan == IO_PLAN:
         body = f"""Hi - thanks for joining SpyBeforeYouBuy. Your Indicators Only plan is active.{trial}
@@ -2786,7 +2787,8 @@ def _scripted_answer(q: str) -> str | None:
            "membership") and has("get", "access", "after", "how",
                                  "want", "start"):
         return ("Pick a plan on the site and check out - Monthly "
-                "starts with a 7-day free trial. After checkout you "
+                "starts with a 7-day free trial (one per person, "
+                "ever). After checkout you "
                 "accept a short disclaimer and get your personal "
                 "Telegram invite, and you enter your TradingView "
                 "username at checkout so the indicators can be "
