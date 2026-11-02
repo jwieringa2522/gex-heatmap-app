@@ -1532,11 +1532,26 @@ def email_welcome_run(key: str = ""):
     sent, skipped = [], []
     try:
         rows = con.execute(
-            """SELECT email, plan, status, invite_link, welcome_sent_ts
+            """SELECT email, plan, status, invite_link, welcome_sent_ts,
+                      stripe_subscription_id
                FROM site_subs""").fetchall()
-        for email, plan, status, invite, sent_ts in rows:
+        for email, plan, status, invite, sent_ts, sub_id in rows:
             if status not in TV_GOOD_STATUSES or sent_ts:
                 continue
+            if sub_id:
+                # The local flag dies with every database wipe; the
+                # Stripe subscription metadata does not. A welcomed
+                # subscription is never emailed again.
+                durable = _stripe_welcomed_ts(sub_id)
+                if durable:
+                    con.execute(
+                        "UPDATE site_subs SET welcome_sent_ts=? "
+                        "WHERE email=?", (durable, email))
+                    con.commit()
+                    skipped.append(
+                        {"email": email,
+                         "reason": "already welcomed (Stripe record)"})
+                    continue
             if plan != IO_PLAN and not invite:
                 skipped.append({"email": email,
                                 "reason": "invite link not on file yet"})
@@ -1544,10 +1559,13 @@ def email_welcome_run(key: str = ""):
             subject, body = _welcome_compose(
                 {"plan": plan, "status": status, "invite_link": invite})
             if _resend_send(email, subject, body):
+                now = time.time()
                 con.execute(
                     "UPDATE site_subs SET welcome_sent_ts=? "
-                    "WHERE email=?", (time.time(), email))
+                    "WHERE email=?", (now, email))
                 con.commit()
+                if sub_id:
+                    _stripe_mark_welcomed(sub_id, now)
                 sent.append({"email": email, "plan": plan})
             else:
                 skipped.append({"email": email,
@@ -1555,6 +1573,35 @@ def email_welcome_run(key: str = ""):
     finally:
         con.close()
     return {"sent": sent, "skipped": skipped}
+
+
+@app.post("/email/mark-welcomed")
+def email_mark_welcomed(payload: dict, key: str = ""):
+    """Keyed backfill: record that a subscriber has already been
+    welcomed - sets the local flag AND the durable marker on the
+    Stripe subscription, so no future database wipe can trigger a
+    re-send. Used for subscribers welcomed before the Stripe-side
+    marker existed."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    email = (payload.get("email") or "").strip().lower()
+    con = _subs_db()
+    try:
+        row = con.execute(
+            "SELECT stripe_subscription_id, welcome_sent_ts "
+            "FROM site_subs WHERE email=?", (email,)).fetchone()
+        if not row:
+            return JSONResponse({"detail": "no such subscriber"},
+                                status_code=404)
+        ts = row[1] or time.time()
+        con.execute("UPDATE site_subs SET welcome_sent_ts=? "
+                    "WHERE email=?", (ts, email))
+        con.commit()
+    finally:
+        con.close()
+    marked = _stripe_mark_welcomed(row[0], ts) if row[0] else False
+    return {"email": email, "welcome_sent_ts": ts,
+            "stripe_marked": marked}
 
 
 @app.post("/email/test-welcome")
@@ -1733,6 +1780,46 @@ def _stripe_get(path: str) -> dict:
     return json.loads(urllib.request.urlopen(req, timeout=20).read())
 
 
+def _stripe_welcomed_ts(sub_id):
+    """The durable welcomed marker lives on the Stripe subscription
+    itself (metadata.welcome_sent_ts). The app database resets on
+    every redeploy, which used to erase the local flag and re-send
+    welcomes (three sends to the test account on Nov 1-2 2026).
+    Stripe metadata survives every wipe. Returns a float ts or
+    None."""
+    if not STRIPE_SECRET_KEY or not sub_id or SBYB_TEST_MODE:
+        return None
+    try:
+        sub = _stripe_get(f"subscriptions/{sub_id}")
+        raw = (sub.get("metadata") or {}).get("welcome_sent_ts")
+        return float(raw) if raw else None
+    except Exception as e:
+        print(f"[email] welcomed check failed for {sub_id}: {e}",
+              flush=True)
+        return None
+
+
+def _stripe_mark_welcomed(sub_id, ts) -> bool:
+    """Persist the welcomed marker onto the Stripe subscription so
+    no future database wipe can make this subscription look
+    unwelcomed again."""
+    if not STRIPE_SECRET_KEY or not sub_id or SBYB_TEST_MODE:
+        return False
+    try:
+        data = urllib.parse.urlencode(
+            {"metadata[welcome_sent_ts]": str(int(ts))}).encode()
+        req = urllib.request.Request(
+            f"https://api.stripe.com/v1/subscriptions/{sub_id}",
+            data=data, method="POST")
+        req.add_header("Authorization", f"Bearer {STRIPE_SECRET_KEY}")
+        urllib.request.urlopen(req, timeout=20).read()
+        return True
+    except Exception as e:
+        print(f"[email] welcomed mark failed for {sub_id}: {e}",
+              flush=True)
+        return False
+
+
 @app.post("/stripe/rebuild-from-email")
 def stripe_rebuild_from_email(payload: dict, key: str = ""):
     """Keyed recovery, second path: rebuild a subscriber row from
@@ -1886,13 +1973,21 @@ def _self_heal_subs():
                         or "Membership")
                 period_end = sub.get("current_period_end") or (
                     items[0].get("current_period_end") if items else None)
+                meta_welcomed = None
+                raw_meta = (sub.get("metadata") or {}).get(
+                    "welcome_sent_ts")
+                if raw_meta:
+                    try:
+                        meta_welcomed = float(raw_meta)
+                    except (TypeError, ValueError):
+                        meta_welcomed = None
                 con.execute(
                     """INSERT INTO site_subs(email, plan, status,
                            stripe_customer_id, stripe_subscription_id,
                            checkout_session_id, invite_link,
                            current_period_end, created_ts, updated_ts,
-                           tv_username)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                           tv_username, welcome_sent_ts)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(email) DO UPDATE SET
                          plan=excluded.plan,
                          status=CASE WHEN site_subs.status='refunded'
@@ -1904,10 +1999,13 @@ def _self_heal_subs():
                          current_period_end=COALESCE(
                              excluded.current_period_end,
                              site_subs.current_period_end),
+                         welcome_sent_ts=COALESCE(
+                             site_subs.welcome_sent_ts,
+                             excluded.welcome_sent_ts),
                          updated_ts=excluded.updated_ts""",
                     (email, plan, sub.get("status"), customer.get("id"),
                      sub.get("id"), None, None, period_end, now, now,
-                     None))
+                     None, meta_welcomed))
                 healed += 1
             con.commit()
             for email in winners:
