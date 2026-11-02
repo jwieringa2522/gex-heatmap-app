@@ -633,6 +633,12 @@ MANIFEST = {
                     "walls are on any ticker."),
     "start_url": "/",
     "scope": "/",
+    # Links to this domain (the /agree/<code> gate links in welcome
+    # emails, /access, /tradingview) must open in the browser, NOT in
+    # the installed app - otherwise Android shows the app's launch
+    # screen (big GEX logo on black) before the page. With
+    # "not-preferred" the app opens only from its home-screen icon.
+    "handle_links": "not-preferred",
     "display": "standalone",
     "background_color": "#000000",
     "theme_color": "#000000",
