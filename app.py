@@ -1471,6 +1471,8 @@ def _welcome_compose(sub: dict) -> tuple[str, str]:
     if plan == IO_PLAN:
         body = f"""Hi - thanks for joining SpyBeforeYouBuy. Your Indicators Only plan is active.{trial}
 
+If this landed in your spam or junk folder, move it to your inbox first - the links below will not work properly from spam.
+
 One step and you are set: enter your TradingView username so I can switch your indicators on:
 {GATE_BASE}/tradingview
 
@@ -1484,6 +1486,8 @@ SpyBeforeYouBuy"""
         return WELCOME_SUBJECT, body
     code = (sub.get("invite_link") or "").split("https://t.me/+", 1)[-1]
     body = f"""Hi - thanks for joining SpyBeforeYouBuy. Your {plan} plan is active and your access is ready.{trial}
+
+If this landed in your spam or junk folder, move it to your inbox first - the links below will not work properly from spam.
 
 Step 1 - Join the private Telegram channel
 Tap your personal access link:
