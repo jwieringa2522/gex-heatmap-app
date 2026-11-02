@@ -1214,7 +1214,9 @@ def _access_steps(tv_note=""):
         "<li><b>Switch on your TradingView indicators.</b> Tap the "
         "button below and enter your username. No account yet? Make a "
         "free one at tradingview.com first, then come back and enter "
-        "it the same way.</li></ol>"
+        "it the same way. Your indicators are switched on by hand, "
+        "so they can take up to 24 hours to appear under "
+        "Invite-only scripts.</li></ol>"
         f"{tv_note}"
         '<a class="btn" href="/tradingview">'
         "ENTER MY TRADINGVIEW USERNAME</a>"
@@ -1257,7 +1259,10 @@ def access_page(session_id: str = ""):
             "no Telegram link with it. One step left: enter your "
             "TradingView username so I can switch your indicators on. "
             "If you do not have a TradingView account yet, make a free "
-            "one at tradingview.com first, then enter your username.</p>"
+            "one at tradingview.com first, then enter your username. "
+            "Your indicators are switched on by hand, so they can "
+            "take up to 24 hours to appear under Invite-only "
+            "scripts.</p>"
             f"{tv_line}"
             '<a class="btn" href="/tradingview">'
             "ENTER MY TRADINGVIEW USERNAME</a>"
@@ -1480,6 +1485,8 @@ If you do not have a TradingView account yet, make a free one at tradingview.com
 
 Your indicators appear in TradingView under Indicators, then Invite-only scripts.
 
+Your indicators are switched on by hand, so they can take up to 24 hours to appear under Invite-only scripts. If they are not there after 24 hours, reply to this email and I will sort it.
+
 Questions? Reply to this email or write to {SUPPORT_EMAIL} and I will get you sorted.
 
 SpyBeforeYouBuy"""
@@ -1500,6 +1507,8 @@ Entered your TradingView username at checkout? You are already set - skip this s
 If you do not have a TradingView account yet, make a free one at tradingview.com first, then enter your username at the same link.
 
 Your indicators appear in TradingView under Indicators, then Invite-only scripts.
+
+Your indicators are switched on by hand, so they can take up to 24 hours to appear under Invite-only scripts. If they are not there after 24 hours, reply to this email and I will sort it.
 
 Questions? Reply to this email or write to {SUPPORT_EMAIL} and I will get you sorted.
 
@@ -1966,7 +1975,10 @@ _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
   subscriber enters at checkout, or later on the claim page at
   https://gex.spybeforeyoubuytrading.com/tradingview (subscription
   email + exact username). The indicators then appear in TradingView
-  under Indicators, then Invite-only scripts.
+  under Indicators, then Invite-only scripts. Indicators are switched
+  on by hand, so they can take up to 24 hours to appear after the
+  username is entered; if they are not there after 24 hours, the
+  subscriber should email support.
 - After subscribing on the site, the subscriber accepts a short
   disclaimer and gets a personal one-time Telegram invite. The access
   page is https://gex.spybeforeyoubuytrading.com/access
@@ -2200,7 +2212,9 @@ def _scripted_answer(q: str) -> str | None:
     if has("indicator", "indicators") and has(
             "missing", "show", "showing", "find", "where", "see"):
         return ("The indicators live in TradingView under Indicators, "
-                "then Invite-only scripts. If yours do not show up: "
+                "then Invite-only scripts. If your username only just "
+                "went in, allow up to 24 hours - they are switched on "
+                "by hand. If yours do not show up: "
                 "press F5 to refresh, then open Indicators again. "
                 "Still missing usually means the username on file is "
                 "not your exact TradingView username - fix it on the "
@@ -2235,7 +2249,9 @@ def _scripted_answer(q: str) -> str | None:
         return ("Join any plan, and at checkout type in your "
                 "TradingView username. The indicators are switched on "
                 "for that username, and you find them in TradingView "
-                "under Indicators, then Invite-only scripts. Every "
+                "under Indicators, then Invite-only scripts. They are "
+                "switched on by hand, so they can take up to 24 hours "
+                "to appear. Every "
                 "plan includes them, even Indicators Only. Skipped the "
                 "box at checkout? Add your username any time on the "
                 "claim page: "
