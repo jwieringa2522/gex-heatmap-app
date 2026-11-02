@@ -85,6 +85,7 @@ def render(d, png_path):
 
     renderer = fig.canvas.get_renderer()
     fig_w_px = fig.dpi * fig.get_figwidth()
+    fig_h_px = fig.dpi * fig.get_figheight()
 
     def _after(t):
         bb = t.get_window_extent(renderer=renderer)
@@ -160,6 +161,13 @@ def render(d, png_path):
     rect(n_cols - 1, 0, PANEL)
     text(n_cols - 1, 0, "Total", color=GRAY, weight=600)
 
+    # measured label-column boxes the flip tag must never cover:
+    # every strike number and wall tag, plus the header and total
+    # row bands of the label column itself
+    label_obstacles = [(tx0, ty1 - chgt, tx0 + lab_w, ty1),
+                       (tx0, ty0, tx0 + lab_w, ty0 + chgt)]
+    num_right = {}         # strike row index -> number's right edge
+
     # strike rows
     for i, s in enumerate(strikes):
         cy = i + 1
@@ -178,17 +186,21 @@ def render(d, png_path):
             bg, fg = PANEL, WHITE
         rect(0, cy, bg)
         sx = tx0 + 0.04 * lab_w
+        tnum = ax.text(sx, ty1 - (cy + 0.5) * chgt, f"{s:g}", color=fg,
+                       fontsize=9, weight=700, va="center", ha="left")
+        _nb = tnum.get_window_extent(renderer=renderer)
+        num_right[i] = _nb.x1 / fig_w_px
+        label_obstacles.append((_nb.x0 / fig_w_px, _nb.y0 / fig_h_px,
+                                _nb.x1 / fig_w_px, _nb.y1 / fig_h_px))
         if tag:
             # tag sits right of the number in white; measured so they never
             # overlap and always stay inside the label cell
-            tnum = ax.text(sx, ty1 - (cy + 0.5) * chgt, f"{s:g}", color=fg,
-                           fontsize=9, weight=700, va="center", ha="left")
-            nx1 = tnum.get_window_extent(renderer=renderer).x1 / fig_w_px
-            ax.text(nx1 + 0.006, ty1 - (cy + 0.5) * chgt, tag, color=WHITE,
-                    fontsize=7, weight=800, va="center", ha="left")
-        else:
-            ax.text(sx, ty1 - (cy + 0.5) * chgt, f"{s:g}", color=fg,
-                    fontsize=9, weight=700, va="center", ha="left")
+            twall = ax.text(num_right[i] + 0.006, ty1 - (cy + 0.5) * chgt,
+                            tag, color=WHITE, fontsize=7, weight=800,
+                            va="center", ha="left")
+            _tb = twall.get_window_extent(renderer=renderer)
+            label_obstacles.append((_tb.x0 / fig_w_px, _tb.y0 / fig_h_px,
+                                    _tb.x1 / fig_w_px, _tb.y1 / fig_h_px))
         # data cells
         for j, v in enumerate(matrix[i]):
             if (i, j) == blue_ij:
@@ -246,10 +258,15 @@ def render(d, png_path):
             ax.plot([tx0, tx1], [_sy, _sy], color=WHITE, lw=1.1,
                     alpha=0.85, zorder=4)
 
-    # Gamma flip: dashed teal line with a tag at the right edge.
-    # Drawn only when the level falls inside the displayed strikes;
-    # the stats strip above carries the value either way. When there
-    # is no flip on the chain, nothing is drawn at all.
+    # Gamma flip: dashed teal line at the level's true height, tag at
+    # the LEFT end beside the strike number of the row the line passes
+    # through - the same spot the wall tags use (a right-edge tag
+    # covered that row's Total value). The tag is kept only if its
+    # measured box stays inside the label column and clears every
+    # strike number and wall tag; otherwise no tag is drawn and the
+    # stats strip value + legend clause still identify the line.
+    # Line drawn only when the level falls inside the displayed
+    # strikes; when there is no flip on the chain, nothing is drawn.
     flip_drawn = False
     flip = d.get("gamma_flip")
     if flip is not None:
@@ -257,11 +274,23 @@ def render(d, png_path):
         if _fy is not None:
             ax.plot([tx0, tx1], [_fy, _fy], color=TEAL, lw=1.4,
                     linestyle=(0, (4, 2)), zorder=4)
-            ax.text(tx1 - 0.004, _fy, "GAMMA FLIP", color=TEALLT,
-                    fontsize=7, weight=800, va="center", ha="right",
-                    zorder=6,
-                    bbox=dict(facecolor=BG, edgecolor="none", pad=1.4))
             flip_drawn = True
+            _ic = min(max(int((ty1 - _fy) / chgt) - 1, 0),
+                      len(strikes) - 1)
+            tflip = ax.text(num_right[_ic] + 0.006, _fy, "GAMMA FLIP",
+                            color=TEALLT, fontsize=7, weight=800,
+                            va="center", ha="left", zorder=6,
+                            bbox=dict(facecolor=BG, edgecolor="none",
+                                      pad=1.4))
+            _fb = tflip.get_window_extent(renderer=renderer)
+            _fx0, _fx1 = _fb.x0 / fig_w_px, _fb.x1 / fig_w_px
+            _fy0, _fy1 = _fb.y0 / fig_h_px, _fb.y1 / fig_h_px
+            _clear = _fx1 <= tx0 + lab_w and all(
+                _fx1 <= ox0 or ox1 <= _fx0 or
+                _fy1 <= oy0 or oy1 <= _fy0
+                for ox0, oy0, ox1, oy1 in label_obstacles)
+            if not _clear:
+                tflip.remove()
 
     # White outline on the biggest single strike x expiry cell -
     # drawn on top of any standout fill it may coincide with.
