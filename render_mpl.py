@@ -270,6 +270,9 @@ def render(d, png_path):
                                edgecolor=WHITE, linewidth=2.0, zorder=6))
 
     # ---- legend ----
+    # Beginner explanations live here, in the PNG, because the marks
+    # they explain (white outline, FLIP tag, white spot label) live
+    # on the image and the legend travels with every screenshot.
     _leg2 = []
     if big_ij is not None:
         _bl = next(e["label"] for e in expiries
@@ -279,18 +282,34 @@ def render(d, png_path):
         _val = _fmt_cell(_big["value"]).replace("$", r"\$")
         _leg2.append(f"White outline: biggest single pile, "
                      f"{_val} at the "
-                     f"\\${_big['strike']:g} strike / {_bl} expiry")
+                     f"\\${_big['strike']:g} strike / {_bl} expiry"
+                     f" - the heaviest single hedge on the map, "
+                     f"and price often gets pulled toward it")
     if flip_tag_drawn:
         _leg2.append("Teal FLIP tag: gamma flip")
-    ax.text(0.015, 0.048 if _leg2 else 0.028,
-            "Green = positive (call) gamma exposure  \u00b7  "
-            "Red = negative (put) gamma exposure  \u00b7  "
-            "Blue = bullish level  \u00b7  Yellow = bearish level  \u00b7  "
-            "Top 18 strikes by gamma shown",
-            color=GRAY, fontsize=8.5, va="top", ha="left")
+    _legend = [
+        "Green = positive (call) gamma exposure  \u00b7  "
+        "Red = negative (put) gamma exposure  \u00b7  "
+        "Blue = bullish level  \u00b7  Yellow = bearish level  \u00b7  "
+        "Top 18 strikes by gamma shown  \u00b7  "
+        "White strike label: the current price",
+    ]
     if _leg2:
-        ax.text(0.015, 0.0245, "  \u00b7  ".join(_leg2),
-                color=GRAY, fontsize=8.5, va="top", ha="left")
+        _legend.append("  \u00b7  ".join(_leg2))
+    if flip is not None:
+        # shown whenever a flip exists, tag drawn or not - the stats
+        # strip and this line carry the level when the tag has no room
+        _legend.append("Gamma flip: above that level, dealer hedging "
+                       "calms moves down - below it, hedging speeds "
+                       "moves up")
+    # one or two lines keep the positions they have always had; a
+    # third line (flip renders) tightens the stack inside the same
+    # strip under the table - measured to fit without clipping
+    _leg_y = {1: (0.028,), 2: (0.048, 0.0245),
+              3: (0.0536, 0.0359, 0.0182)}[len(_legend)]
+    for _s, _y in zip(_legend, _leg_y):
+        ax.text(0.015, _y, _s, color=GRAY, fontsize=8.5,
+                va="top", ha="left")
 
     fig.savefig(png_path, dpi=200, facecolor=BG)
     plt.close(fig)
