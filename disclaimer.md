@@ -184,9 +184,12 @@ Content or your access link will result in immediate removal without refund.
 
 For subscriptions purchased through the Spy Before You Buy website: the
 Monthly plan starts with a 7-day free trial, and a payment card is required
-to start it; cancel during the trial and you pay nothing. A first purchase
-is refundable within 7 days of the charge. Renewals and the Lifetime plan
-are final after that window. Cancelling stops future charges; access
+to start it; cancel during the trial and you pay nothing. The free trial is
+one per person, ever - if you have used a free trial before, a new Monthly
+subscription starts as a paid subscription right away. Refunds are limited
+to one per person, ever: a first purchase is refundable within 7 days of
+the charge, and nothing is refundable after that. Renewals and the Lifetime
+plan are final. Cancelling stops future charges; access
 continues to the end of the paid or trial period.
 
 ## 16. FORWARD-LOOKING STATEMENTS

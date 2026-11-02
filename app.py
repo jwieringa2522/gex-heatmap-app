@@ -842,6 +842,16 @@ def _subs_db():
         con.execute("ALTER TABLE site_subs ADD COLUMN tv_username TEXT")
     if "welcome_sent_ts" not in cols:
         con.execute("ALTER TABLE site_subs ADD COLUMN welcome_sent_ts REAL")
+    if "trial_repeat" not in cols:
+        con.execute("ALTER TABLE site_subs ADD COLUMN trial_repeat INTEGER")
+    # One-trial / one-refund identity registry (Nov 2 2026). Local
+    # mirror only - the durable stamps live on Stripe (subscription +
+    # customer metadata) and this table is rebuilt from them at boot
+    # by _self_heal_subs, so a database wipe cannot erase who has
+    # already used a trial or a refund.
+    con.execute("""CREATE TABLE IF NOT EXISTS identity_flags(
+        kind TEXT, key TEXT, trial_used_ts REAL, refund_used_ts REAL,
+        source TEXT, updated_ts REAL, PRIMARY KEY(kind, key))""")
     con.execute("""CREATE TABLE IF NOT EXISTS stripe_events(
         event_id TEXT PRIMARY KEY, type TEXT, ts REAL)""")
     con.execute("""CREATE TABLE IF NOT EXISTS tv_claims(
@@ -1024,6 +1034,16 @@ def _on_checkout_completed(con, obj):
             con.execute(
                 """UPDATE site_subs SET stripe_subscription_id=NULL
                    WHERE email=?""", (email,))
+    if status == "trialing" and obj.get("subscription"):
+        # One free trial per person, ever (locked policy, Nov 2
+        # 2026): stamp this identity as trial-used, or end the
+        # trial on the spot if any identity key was already used.
+        row_tv = con.execute(
+            "SELECT tv_username FROM site_subs WHERE email=?",
+            (email,)).fetchone()
+        _enforce_trial_policy(
+            con, email, obj.get("subscription"), obj.get("customer"),
+            tv_username or (row_tv[0] if row_tv else None))
 
 
 def _find_sub(con, obj):
@@ -1108,6 +1128,33 @@ def _on_subscription_updated(con, obj):
             con.execute(
                 "UPDATE site_subs SET plan=? WHERE email=?",
                 (new_plan, email))
+    if obj.get("status") == "trialing":
+        # One-trial enforcement, backup path: if the checkout event
+        # was missed (the Nov 1 failure class), the identity is
+        # still stamped - or a repeat trial ended - here. A repeat
+        # marker already on the subscription is mirrored to the row.
+        meta = obj.get("metadata") or {}
+        if meta.get("sbyb_trial_repeat"):
+            con.execute(
+                "UPDATE site_subs SET trial_repeat=1 WHERE email=?",
+                (email,))
+        if not meta.get("sbyb_trial_used_ts"):
+            started = obj.get("trial_start") or obj.get("created") or 0
+            if started and time.time() - started > 86400:
+                # A trial that has already been running for over a
+                # day started before this enforcement could see it
+                # begin (or long before): grandfathered, it keeps
+                # its terms. Its own trial_start still seeds the
+                # registry at boot, so any FUTURE trial by this
+                # identity is caught as a repeat.
+                pass
+            else:
+                row = con.execute(
+                    "SELECT tv_username FROM site_subs WHERE email=?",
+                    (email,)).fetchone()
+                _enforce_trial_policy(
+                    con, email, obj.get("id"), obj.get("customer"),
+                    row[0] if row else None)
 
 
 def _on_subscription_deleted(con, obj):
@@ -1129,12 +1176,16 @@ def _on_payment_failed(con, obj):
             (time.time(), email))
 
 
-def _on_charge_reversed(con, obj):
+def _on_charge_reversed(con, obj, refund=False):
     email = _find_sub(con, obj)
     if email:
         con.execute(
             "UPDATE site_subs SET status='refunded', updated_ts=? WHERE email=?",
             (time.time(), email))
+        if refund:
+            # One refund per person, ever (locked policy, Nov 2
+            # 2026): stamp the identity refund-used, durably.
+            _stamp_refund_used(con, email)
 
 
 @app.post("/stripe/webhook")
@@ -1169,7 +1220,9 @@ async def stripe_webhook(request: Request):
             _on_subscription_deleted(con, obj)
         elif etype == "invoice.payment_failed":
             _on_payment_failed(con, obj)
-        elif etype in ("charge.refunded", "charge.dispute.created"):
+        elif etype == "charge.refunded":
+            _on_charge_reversed(con, obj, refund=True)
+        elif etype == "charge.dispute.created":
             _on_charge_reversed(con, obj)
         con.commit()
     finally:
@@ -1346,6 +1399,10 @@ async def tv_claim_submit(request: Request):
                 con.execute(
                     """UPDATE site_subs SET tv_username=?, updated_ts=?
                        WHERE email=?""", (tv, time.time(), email))
+                # A TradingView username becoming known later joins
+                # the identity registry under the same trial/refund
+                # stamps, so it cannot be used to dodge them.
+                _link_tv_key(con, email, tv)
             con.execute(
                 "INSERT INTO tv_claims VALUES(?,?,?,?)",
                 (email, tv, matched, time.time()))
@@ -1374,15 +1431,26 @@ def stripe_subs(key: str = ""):
             """SELECT email, plan, status, stripe_customer_id,
                stripe_subscription_id, checkout_session_id, invite_link,
                current_period_end, created_ts, updated_ts, tv_username,
-               welcome_sent_ts
+               welcome_sent_ts, trial_repeat
                FROM site_subs""").fetchall()
+        flags = {r[0]: (r[1], r[2]) for r in con.execute(
+            "SELECT key, trial_used_ts, refund_used_ts "
+            "FROM identity_flags WHERE kind='email'")}
     finally:
         con.close()
     cols = ("email", "plan", "status", "stripe_customer_id",
             "stripe_subscription_id", "checkout_session_id", "invite_link",
             "current_period_end", "created_ts", "updated_ts", "tv_username",
-            "welcome_sent_ts")
-    return {"subs": [dict(zip(cols, r)) for r in rows]}
+            "welcome_sent_ts", "trial_repeat")
+    subs = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        d["trial_repeat"] = 1 if d.get("trial_repeat") else 0
+        trial_ts, refund_ts = flags.get(d["email"], (None, None))
+        d["trial_used_ts"] = trial_ts
+        d["refund_used_ts"] = refund_ts
+        subs.append(d)
+    return {"subs": subs}
 
 
 @app.post("/stripe/repair-invite")
@@ -1792,6 +1860,14 @@ def _stripe_get(path: str) -> dict:
     return json.loads(urllib.request.urlopen(req, timeout=20).read())
 
 
+def _stripe_post(path: str, fields: dict) -> dict:
+    data = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(f"https://api.stripe.com/v1/{path}",
+                                 data=data, method="POST")
+    req.add_header("Authorization", f"Bearer {STRIPE_SECRET_KEY}")
+    return json.loads(urllib.request.urlopen(req, timeout=20).read())
+
+
 def _stripe_welcomed_ts(sub_id):
     """The durable welcomed marker lives on the Stripe subscription
     itself (metadata.welcome_sent_ts). The app database resets on
@@ -1830,6 +1906,217 @@ def _stripe_mark_welcomed(sub_id, ts) -> bool:
         print(f"[email] welcomed mark failed for {sub_id}: {e}",
               flush=True)
         return False
+
+
+# ---------- one free trial / one refund per person, ever ----------
+# Locked policy (Justin's order, Nov 2 2026): the 7-day Monthly trial
+# is one per person, ever, and a refund is one per person, ever
+# (first purchase, inside 7 days; renewals and Lifetime final).
+#
+# Identity keys the app genuinely sees: the subscriber email, the
+# TradingView username (checkout custom field or the claim page),
+# and - when the restricted Stripe key may read payment methods -
+# the card fingerprint. Telegram identity is NOT capturable here:
+# the heatmap login verifies a Telegram user but nothing app-side
+# ever links that user to a subscription row (the invite join is
+# logged by the VM roster bot, not by this app), so no Telegram key
+# is tracked rather than faking one.
+#
+# Durability follows the welcome_sent_ts pattern: stamps are written
+# to Stripe subscription metadata (the proven write path) and to
+# customer metadata (attempted; skipped quietly if the restricted
+# key cannot write customers). The local identity_flags table is a
+# mirror, rebuilt at boot by _self_heal_subs from those stamps and
+# from trial_start on every subscription Stripe returns, so a
+# database wipe cannot make a used trial or refund look unused.
+#
+# Enforcement point: checkouts run through static Stripe Payment
+# Links, so a repeat trial cannot be blocked before checkout. It is
+# ended the moment the webhook sees it - trial_end is set to now and
+# the subscription converts to paid immediately.
+
+def _norm_tv(tv):
+    return (tv or "").strip().lstrip("@").lower() or None
+
+
+def _identity_keys(email=None, tv=None, card=None):
+    keys = []
+    if email:
+        keys.append(("email", email.strip().lower()))
+    tvn = _norm_tv(tv)
+    if tvn:
+        keys.append(("tv", tvn))
+    if card:
+        keys.append(("card", card))
+    return keys
+
+
+def _flag_stamp(con, kind, key, which, ts, source):
+    """Record a trial-used or refund-used stamp for one identity
+    key. The earliest stamp wins; the source records which
+    subscription earned it (repeat checks ignore a subscription's
+    own stamp)."""
+    col = "trial_used_ts" if which == "trial" else "refund_used_ts"
+    con.execute(
+        f"""INSERT INTO identity_flags(kind, key, {col}, source,
+               updated_ts)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(kind, key) DO UPDATE SET
+              {col}=COALESCE(identity_flags.{col}, excluded.{col}),
+              source=COALESCE(identity_flags.source, excluded.source),
+              updated_ts=excluded.updated_ts""",
+        (kind, key, ts, source, time.time()))
+
+
+def _stripe_card_fingerprint(customer_id):
+    """Best-effort: fingerprint of the customer's first card on
+    file. Needs PaymentMethods read on the restricted key; any
+    failure (including a 403) returns None and the identity is
+    tracked on the remaining keys."""
+    if not STRIPE_SECRET_KEY or not customer_id or SBYB_TEST_MODE:
+        return None
+    try:
+        pms = _stripe_get(
+            f"payment_methods?customer={customer_id}&type=card&limit=5")
+        for pm in pms.get("data") or []:
+            fp = (pm.get("card") or {}).get("fingerprint")
+            if fp:
+                return fp
+    except Exception as e:
+        print(f"[identity] card fingerprint fetch failed for "
+              f"{customer_id}: {e}", flush=True)
+    return None
+
+
+def _stripe_stamp_identity(sub_id=None, customer_id=None,
+                           trial_ts=None, refund_ts=None, tv=None,
+                           card=None):
+    """Persist identity markers on Stripe so a database wipe cannot
+    erase them. Subscription metadata first (proven write path);
+    customer metadata is attempted as well and quietly skipped if
+    the restricted key cannot write customers. The boot rebuild
+    reads both. Best effort throughout: never raises."""
+    fields = {}
+    if trial_ts:
+        fields["metadata[sbyb_trial_used_ts]"] = str(int(trial_ts))
+    if refund_ts:
+        fields["metadata[sbyb_refund_used_ts]"] = str(int(refund_ts))
+    tvn = _norm_tv(tv)
+    if tvn:
+        fields["metadata[sbyb_tv]"] = tvn
+    if card:
+        fields["metadata[sbyb_card]"] = card
+    if not fields or not STRIPE_SECRET_KEY or SBYB_TEST_MODE:
+        return
+    if sub_id:
+        try:
+            _stripe_post(f"subscriptions/{sub_id}", fields)
+        except Exception as e:
+            print(f"[identity] subscription stamp failed for "
+                  f"{sub_id}: {e}", flush=True)
+    if customer_id:
+        try:
+            _stripe_post(f"customers/{customer_id}", fields)
+        except Exception as e:
+            print(f"[identity] customer stamp failed for "
+                  f"{customer_id}: {e}", flush=True)
+
+
+def _sub_ids(con, email):
+    row = con.execute(
+        "SELECT stripe_customer_id, stripe_subscription_id, "
+        "tv_username FROM site_subs WHERE email=?",
+        (email,)).fetchone()
+    return row if row else (None, None, None)
+
+
+def _enforce_trial_policy(con, email, sub_id, customer_id,
+                          tv_username):
+    """A subscription just entered trialing. First trial ever for
+    this identity: stamp every known key, locally and on Stripe.
+    Repeat trial - any key already stamped by a DIFFERENT
+    subscription: end the trial immediately so it converts to
+    paid, and flag the row so the repeat is visible."""
+    if not sub_id:
+        return
+    card = _stripe_card_fingerprint(customer_id)
+    keys = _identity_keys(email=email, tv=tv_username, card=card)
+    match = None
+    for kind, key in keys:
+        r = con.execute(
+            "SELECT trial_used_ts, source FROM identity_flags "
+            "WHERE kind=? AND key=?", (kind, key)).fetchone()
+        if r and r[0] and r[1] != sub_id:
+            match = (kind, key, r[1])
+            break
+    if match:
+        ended = False
+        if STRIPE_SECRET_KEY and not SBYB_TEST_MODE:
+            try:
+                _stripe_post(
+                    f"subscriptions/{sub_id}",
+                    {"trial_end": str(int(time.time())),
+                     "metadata[sbyb_trial_repeat]": "1"})
+                ended = True
+            except Exception as e:
+                print(f"[identity] trial-end failed for {sub_id}: "
+                      f"{e}", flush=True)
+        con.execute(
+            "UPDATE site_subs SET trial_repeat=1, updated_ts=? "
+            "WHERE email=?", (time.time(), email))
+        print(f"[identity] REPEAT TRIAL {email}: matched "
+              f"{match[0]} key first stamped by {match[2]}; "
+              f"trial_end set now={ended} sub={sub_id}", flush=True)
+        return
+    ts = time.time()
+    for kind, key in keys:
+        _flag_stamp(con, kind, key, "trial", ts, sub_id)
+    _stripe_stamp_identity(sub_id=sub_id, customer_id=customer_id,
+                           trial_ts=ts, tv=tv_username, card=card)
+    print(f"[identity] trial stamped for {email}: "
+          f"keys={[k for k, _ in keys]} sub={sub_id}", flush=True)
+
+
+def _stamp_refund_used(con, email):
+    """Mark an identity refund-used on every known key, locally and
+    on Stripe. Fired by the charge.refunded webhook and backfilled
+    by the boot self-heal for rows already sitting at 'refunded'.
+    Any later purchase by this identity is all-sales-final - that
+    is enforced by the support flow, never by blocking a sale."""
+    customer_id, sub_id, tv = _sub_ids(con, email)
+    card = _stripe_card_fingerprint(customer_id)
+    keys = _identity_keys(email=email, tv=tv, card=card)
+    ts = time.time()
+    for kind, key in keys:
+        _flag_stamp(con, kind, key, "refund", ts, sub_id)
+    _stripe_stamp_identity(sub_id=sub_id, customer_id=customer_id,
+                           refund_ts=ts, tv=tv, card=card)
+    print(f"[identity] refund stamped for {email}: "
+          f"keys={[k for k, _ in keys]}", flush=True)
+
+
+def _link_tv_key(con, email, tv):
+    """A TradingView username became known for a subscriber who
+    already carries identity stamps: attach the tv key to the same
+    stamps, locally and on Stripe, so the username cannot later be
+    used to dodge them."""
+    tvn = _norm_tv(tv)
+    if not tvn:
+        return
+    row = con.execute(
+        "SELECT trial_used_ts, refund_used_ts, source "
+        "FROM identity_flags WHERE kind='email' AND key=?",
+        (email,)).fetchone()
+    if not row:
+        return
+    trial_ts, refund_ts, source = row
+    if trial_ts:
+        _flag_stamp(con, "tv", tvn, "trial", trial_ts, source)
+    if refund_ts:
+        _flag_stamp(con, "tv", tvn, "refund", refund_ts, source)
+    customer_id, sub_id, _tv = _sub_ids(con, email)
+    _stripe_stamp_identity(sub_id=sub_id, customer_id=customer_id,
+                           tv=tvn)
 
 
 @app.post("/stripe/rebuild-from-email")
@@ -1959,6 +2246,7 @@ def _self_heal_subs():
         # first self-heal run (Nov 1 2026) - never again.
         live_states = ("trialing", "active", "past_due")
         winners = {}
+        ident = []
         for sub in subs:
             customer = sub.get("customer") or {}
             if not isinstance(customer, dict):
@@ -1966,6 +2254,7 @@ def _self_heal_subs():
             email = (customer.get("email") or "").strip().lower()
             if not email:
                 continue
+            ident.append((email, sub, customer))
             rank = (1 if sub.get("status") in live_states else 0,
                     sub.get("created") or 0)
             if email not in winners or rank > winners[email][0]:
@@ -2020,6 +2309,61 @@ def _self_heal_subs():
                      None, meta_welcomed))
                 healed += 1
             con.commit()
+            # Rebuild the one-trial / one-refund identity registry
+            # from Stripe: the metadata stamps the webhook handlers
+            # write, plus trial_start on every subscription that has
+            # ever trialed (covers trials taken before the stamps
+            # existed). Runs over ALL subscriptions, not just the
+            # per-email winners - an old canceled sub still proves
+            # its owner used a trial.
+            for email, sub, customer in ident:
+                meta = {}
+                for src in (customer.get("metadata") or {},
+                            sub.get("metadata") or {}):
+                    meta.update(src)
+                keys = _identity_keys(email=email,
+                                      tv=meta.get("sbyb_tv"),
+                                      card=meta.get("sbyb_card"))
+                if sub.get("trial_start"):
+                    try:
+                        t0 = float(sub["trial_start"])
+                    except (TypeError, ValueError):
+                        t0 = None
+                    if t0:
+                        for kind, key in keys:
+                            _flag_stamp(con, kind, key, "trial",
+                                        t0, sub.get("id"))
+                for field, which in (
+                        ("sbyb_trial_used_ts", "trial"),
+                        ("sbyb_refund_used_ts", "refund")):
+                    raw = meta.get(field)
+                    if raw:
+                        try:
+                            ts = float(raw)
+                        except (TypeError, ValueError):
+                            continue
+                        for kind, key in keys:
+                            _flag_stamp(con, kind, key, which, ts,
+                                        sub.get("id"))
+                if meta.get("sbyb_trial_repeat"):
+                    con.execute(
+                        "UPDATE site_subs SET trial_repeat=1 "
+                        "WHERE stripe_subscription_id=?",
+                        (sub.get("id"),))
+            con.commit()
+            # Backfill: a row already sitting at 'refunded' whose
+            # identity has no refund stamp yet (the refund landed
+            # before the stamp existed, or its webhook was missed)
+            # gets stamped now, locally and on Stripe.
+            for (em,) in con.execute(
+                    "SELECT email FROM site_subs "
+                    "WHERE status='refunded'").fetchall():
+                r = con.execute(
+                    "SELECT refund_used_ts FROM identity_flags "
+                    "WHERE kind='email' AND key=?", (em,)).fetchone()
+                if not (r and r[0]):
+                    _stamp_refund_used(con, em)
+            con.commit()
             for email in winners:
                 _ensure_invite(con, email)
             con.commit()
@@ -2047,10 +2391,14 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
 - Plans (USD): Monthly $20/month, Quarterly $45/quarter, Yearly $150/year,
   Lifetime $500 one payment, Indicators Only $10/month.
-- Monthly starts with a 7-day free trial. A card is required for the
-  trial, and the trial is one per person.
-- Refunds: full refund inside the first 7 days of a first purchase only.
-  After that window, renewals and Lifetime are final.
+- Monthly starts with a 7-day free trial. A card is required for
+  the trial. The trial is one per person, ever - if you have had a
+  free trial before, a new Monthly signup is charged right away,
+  with no trial.
+- Refunds: one refund per person, ever - a full refund inside the
+  first 7 days of a first purchase only. After that window, or if
+  you have already had a refund, all sales are final; renewals and
+  Lifetime are always final.
 - The core membership is the same on every full plan: private Telegram
   channel alerts (day, swing and options), the GEX heatmap app, the
   pre-market Gamma Brief, the daily whale scanner, custom TradingView
@@ -2141,7 +2489,7 @@ _PLANS_ANSWER = ("Plans (all USD): Monthly $20/month, Quarterly "
                  "$45/quarter, Yearly $150/year, Lifetime $500 one "
                  "payment, and Indicators Only $10/month.\n"
                  "Monthly starts with a 7-day free trial (card required, "
-                 "one per person). Every full plan carries the same core "
+                 "one per person, ever). Every full plan carries the same core "
                  "membership - Yearly and Lifetime also add GEX Heatmaps "
                  "PRO. Indicators Only is just the TradingView "
                  "indicators, with no Telegram channel, alerts, GEX "
@@ -2208,14 +2556,17 @@ def _scripted_answer(q: str) -> str | None:
                 "or access questions, include the email you subscribed "
                 "with.")
     if has("refund", "refunds") or phrase("money back"):
-        return ("Yes - on a first purchase. Ask within 7 days of the "
+        return ("Yes - on a first purchase, and it is one refund "
+                "per person, ever. Ask within 7 days of the "
                 "charge and it is refunded in full. After that window, "
                 "renewals and Lifetime are final. Monthly also starts "
                 "with a 7-day free trial, so you can try everything "
                 "before ever being charged.")
     if has("trial") or phrase("free week", "try it free", "try free"):
         return ("Monthly starts with a 7-day free trial - card "
-                "required, one trial per person. You get everything in "
+                "required, one trial per person, ever. If you have "
+                "already had a free trial, a new Monthly signup is "
+                "charged right away instead. You get everything in "
                 "the membership during the trial, and you can cancel "
                 "before the trial ends and never be charged. The other "
                 "plans are charged at checkout.")
@@ -2224,8 +2575,8 @@ def _scripted_answer(q: str) -> str | None:
                 "Cancelling stops future charges, and your access runs "
                 "to the end of the period you have paid for, or to the "
                 "end of your trial. A first purchase is refundable "
-                "within 7 days; renewals and Lifetime are final after "
-                "that window.")
+                "within 7 days (one refund per person, ever); "
+                "renewals and Lifetime are final after that window.")
     if has("upgrade", "downgrade") or (
             has("change", "switch") and has("plan", "plans")):
         return ("Yes. Upgrading charges only the difference and takes "
@@ -2274,9 +2625,9 @@ def _scripted_answer(q: str) -> str | None:
             "stripe", "payment") or phrase("credit card", "debit card"):
         return ("Checkout is handled securely by Stripe - your card "
                 "details never touch this site. Monthly starts with a "
-                "7-day free trial, card required. The other plans are "
-                "charged at checkout and renew automatically until you "
-                "cancel.")
+                "7-day free trial, card required, one per person, "
+                "ever. The other plans are charged at checkout and "
+                "renew automatically until you cancel.")
     # ---- TradingView guide flows ----
     if has("verify") and has("email", "tradingview", "account"):
         return ("TradingView emails you a verification link when you "
