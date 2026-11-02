@@ -1174,6 +1174,10 @@ ol.steps{text-align:left;max-width:520px;margin:0 auto 26px;color:#cfd8d5;
 line-height:1.6;padding-left:22px}
 ol.steps li{margin-bottom:16px}
 ol.steps b{color:#fff}
+a.guide{color:#a8ddd2;font-weight:bold;text-decoration:none;
+background:rgba(94,143,134,.22);padding:3px 10px;border-radius:999px;
+white-space:nowrap}
+a.guide:hover{background:rgba(94,143,134,.4)}
 </style></head><body>
 <h1>SPY BEFORE YOU BUY</h1>
 <div class="tag">WAIT. CONFIRM. EXECUTE.</div>
@@ -1183,7 +1187,7 @@ __BODY__
 
 _GUIDE_LINE = (
     '<div class="small">Need help setting up? '
-    '<a href="https://spybeforeyoubuytrading.com/#guide">'
+    '<a class="guide" href="https://spybeforeyoubuytrading.com/#guide">'
     "Read the step-by-step guide.</a></div>")
 
 
