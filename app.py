@@ -860,6 +860,8 @@ def _make_site_invite(email: str):
             f"test:{email}:{time.time()}".encode()).hexdigest()[:16]
         return f"https://t.me/+TEST{code}"
     if not BOT_TOKEN:
+        print(f"[stripe] invite mint skipped for {email}: no bot token",
+              flush=True)
         return None
     try:
         res = _tg_api("createChatInviteLink", {
@@ -867,9 +869,38 @@ def _make_site_invite(email: str):
             "name": ("site:" + email)[:32],
             "member_limit": 1,
         })
-        return res.get("result", {}).get("invite_link")
-    except Exception:
+        link = res.get("result", {}).get("invite_link")
+        if not link:
+            print(f"[stripe] invite mint failed for {email}: {res}",
+                  flush=True)
+        return link
+    except Exception as e:
+        print(f"[stripe] invite mint error for {email}: {e}", flush=True)
         return None
+
+
+def _ensure_invite(con, email):
+    """Mint and store a Telegram invite for a subscriber who should
+    have one but does not - a checkout-time mint can fail silently
+    (Telegram hiccup, rights), and until Nov 1 2026 nothing ever
+    retried, leaving the subscriber with no way in. Returns the
+    invite link on file afterwards."""
+    row = con.execute(
+        "SELECT plan, status, invite_link FROM site_subs WHERE email=?",
+        (email,)).fetchone()
+    if not row:
+        return None
+    plan, status, invite = row
+    if plan == IO_PLAN or invite:
+        return invite
+    if status not in ("active", "trialing", "lifetime", "past_due"):
+        return invite
+    invite = _make_site_invite(email)
+    if invite:
+        con.execute(
+            "UPDATE site_subs SET invite_link=?, updated_ts=? "
+            "WHERE email=?", (invite, time.time(), email))
+    return invite
 
 
 def _sub_plan(obj, session=None):
@@ -931,6 +962,9 @@ def _on_checkout_completed(con, obj):
         (email, plan, status, obj.get("customer"),
          obj.get("subscription"), obj.get("id"), invite, None, now, now,
          tv_username))
+    print(f"[stripe] checkout completed: {email} plan={plan} "
+          f"status={status} session={obj.get('id')} "
+          f"invite={'yes' if invite else 'NO'}", flush=True)
     if mode == "payment" and old_sub_id:
         # Lifetime bought: stop the recurring subscription so the member
         # is never double-charged. If the cancel cannot run (no API key
@@ -989,11 +1023,22 @@ def _on_subscription_updated(con, obj):
     email = _find_sub(con, obj)
     if not email:
         return
+    # Newer Stripe API versions moved current_period_end off the
+    # subscription object onto its items - fall back so the roster
+    # sync keeps seeing the real period end.
+    period_end = obj.get("current_period_end")
+    if not period_end:
+        items = (obj.get("items") or {}).get("data") or []
+        if items:
+            period_end = items[0].get("current_period_end")
     con.execute(
         """UPDATE site_subs SET status=?, current_period_end=?,
            stripe_subscription_id=?, updated_ts=? WHERE email=?""",
-        (obj.get("status"), obj.get("current_period_end"),
+        (obj.get("status"), period_end,
          obj.get("id"), time.time(), email))
+    # Self-heal: a subscriber entitled to Telegram access who still
+    # has no invite (checkout-time mint failed) gets one minted here.
+    _ensure_invite(con, email)
     # Plan switches (upgrades/downgrades via the Stripe customer portal)
     # change entitlements: Indicators Only has no Telegram access, full
     # plans do. Moving up to a full plan mints a fresh invite; the
@@ -1094,6 +1139,11 @@ p{color:#cfd8d5;max-width:520px;margin:0 auto 28px;line-height:1.55}
 a.btn{display:inline-block;background:#5e8f86;color:#fff;text-decoration:none;
 padding:14px 30px;border-radius:999px;font-weight:bold;letter-spacing:1px}
 .small{color:#7d8a87;font-size:13px;margin-top:26px}
+.big{font-size:27px;font-weight:bold;letter-spacing:.5px;margin:0 0 14px}
+ol.steps{text-align:left;max-width:520px;margin:0 auto 26px;color:#cfd8d5;
+line-height:1.6;padding-left:22px}
+ol.steps li{margin-bottom:16px}
+ol.steps b{color:#fff}
 </style></head><body>
 <h1>SPY BEFORE YOU BUY</h1>
 <div class="tag">WAIT. CONFIRM. EXECUTE.</div>
@@ -1101,8 +1151,34 @@ __BODY__
 </body></html>"""
 
 
+def _access_steps(tv_note=""):
+    """The two simple steps every full-plan buyer follows - email
+    first (that path survives a lost tab), TradingView second."""
+    return (
+        "<p>Two quick steps and you have everything:</p>"
+        "<ol class=\"steps\">"
+        "<li><b>Join the Telegram channel.</b> Your private access link "
+        "is on its way to the email you paid with - look for an email "
+        "from SpyBeforeYouBuy called \"Your SpyBeforeYouBuy access is "
+        "ready\". Tap the link in that email to join. If it is not in "
+        "your inbox after about 20 minutes, check your spam folder.</li>"
+        "<li><b>Switch on your TradingView indicators.</b> If you have "
+        "a TradingView account, tap the button below and enter your "
+        "username. If you do not have one yet, make a free account at "
+        "tradingview.com first, then come back and enter your username "
+        "the same way.</li></ol>"
+        f"{tv_note}"
+        '<a class="btn" href="/tradingview">'
+        "ENTER MY TRADINGVIEW USERNAME</a>"
+        f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>')
+
+
 @app.get("/access", response_class=HTMLResponse)
 def access_page(session_id: str = ""):
+    # Success page (redesign ordered Nov 1 2026): the welcome email is
+    # the main path, so this page always lands on clear next steps -
+    # never a dead end. When the checkout session resolves, the
+    # personal Telegram link is shown here too as a backup.
     row = None
     if session_id:
         con = _subs_db()
@@ -1111,38 +1187,59 @@ def access_page(session_id: str = ""):
                 """SELECT email, plan, status, invite_link, tv_username
                    FROM site_subs
                    WHERE checkout_session_id=?""", (session_id,)).fetchone()
+            if row and not row[3] and row[1] != IO_PLAN:
+                _ensure_invite(con, row[0])
+                con.commit()
+                row = con.execute(
+                    """SELECT email, plan, status, invite_link,
+                       tv_username FROM site_subs
+                       WHERE checkout_session_id=?""",
+                    (session_id,)).fetchone()
         finally:
             con.close()
     if row and row[1] == IO_PLAN:
-        body = ("<p>Payment confirmed - welcome in. Your plan is "
-                "TradingView indicators only, so there is no Telegram link "
-                "with it. Your indicators are being switched on for the "
-                "TradingView username you gave at checkout - they appear "
-                "under Invite-only scripts in your TradingView account.</p>"
+        tv_line = (
+            f'<div class="small">TradingView username on file: {row[4]} '
+            "- your indicators are being switched on.</div>"
+            if row[4] else "")
+        body = (
+            '<div class="big">You are in - your payment worked.</div>'
+            "<p>Your plan is TradingView indicators only, so there is "
+            "no Telegram link with it. One step left: enter your "
+            "TradingView username so I can switch your indicators on. "
+            "If you do not have a TradingView account yet, make a free "
+            "one at tradingview.com first, then enter your username.</p>"
+            f"{tv_line}"
+            '<a class="btn" href="/tradingview">'
+            "ENTER MY TRADINGVIEW USERNAME</a>"
+            f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>'
+            f'<div class="small">Plan: {row[1]} - {row[0]}</div>')
+    elif row:
+        tv_note = (
+            f'<p class="small" style="margin-top:0">TradingView username '
+            f"on file: {row[4]} - your indicators are being switched "
+            "on.</p>" if row[4] else "")
+        personal = ""
+        if row[3]:
+            code = row[3].split("https://t.me/+", 1)[-1]
+            personal = (
+                "<p>Your Telegram link is ready right now as well - no "
+                "need to wait for the email. It is tied to your "
+                "subscription and works once, so keep it to yourself:</p>"
+                f'<a class="btn" href="{GATE_BASE}/agree/{code}">'
+                "GET MY TELEGRAM ACCESS</a>"
                 f'<div class="small">Plan: {row[1]} - {row[0]}</div>')
-    elif row and row[3]:
-        code = row[3].split("https://t.me/+", 1)[-1]
         portal = (f'<div class="small"><a href="{STRIPE_PORTAL_URL}">'
                   f"Manage or upgrade my subscription</a></div>"
                   if STRIPE_PORTAL_URL else "")
-        body = (f"<p>Payment confirmed - welcome in. Your personal Telegram "
-                f"access link is below. It is tied to your subscription and "
-                f"works once, so keep it to yourself.</p>"
-                f'<a class="btn" href="{GATE_BASE}/agree/{code}">'
-                f"GET MY TELEGRAM ACCESS</a>"
-                f'<div class="small">Plan: {row[1]} - {row[0]}</div>'
-                f"{portal}")
-    elif row:
-        body = ("<p>Payment confirmed. Your personal access link is still "
-                "being created - refresh this page in a minute.</p>")
+        body = ('<div class="big">You are in - your payment worked.</div>'
+                f"{personal}{_access_steps(tv_note)}{portal}")
     else:
-        body = ("<p>We could not find that checkout yet. If you just paid, "
-                "give it a minute and refresh. If it still does not show, "
-                "contact the owner with the email you paid with.</p>")
-    if row and (row[3] or row[1] == IO_PLAN) and not row[4]:
-        body += ('<div class="small">No TradingView username on file yet - '
-                 '<a href="/tradingview">add it here</a> so your '
-                 'indicators can be switched on.</div>')
+        body = ('<div class="big">Almost there.</div>'
+                "<p>If you just paid, your payment went through and "
+                "your access email is on its way to the email you paid "
+                "with. Here is what happens next:</p>"
+                f"{_access_steps()}")
     return ACCESS_PAGE.replace("__BODY__", body)
 
 
@@ -1211,14 +1308,44 @@ def stripe_subs(key: str = ""):
     try:
         rows = con.execute(
             """SELECT email, plan, status, stripe_customer_id,
-               stripe_subscription_id, invite_link, current_period_end,
-               updated_ts, tv_username FROM site_subs""").fetchall()
+               stripe_subscription_id, checkout_session_id, invite_link,
+               current_period_end, created_ts, updated_ts, tv_username
+               FROM site_subs""").fetchall()
     finally:
         con.close()
     cols = ("email", "plan", "status", "stripe_customer_id",
-            "stripe_subscription_id", "invite_link", "current_period_end",
-            "updated_ts", "tv_username")
+            "stripe_subscription_id", "checkout_session_id", "invite_link",
+            "current_period_end", "created_ts", "updated_ts", "tv_username")
     return {"subs": [dict(zip(cols, r)) for r in rows]}
+
+
+@app.post("/stripe/repair-invite")
+def stripe_repair_invite(payload: dict, key: str = ""):
+    """Keyed repair: mint and store a missing Telegram invite for one
+    subscriber (by email) and return the full row. Same key guard as
+    /stripe/subs - 404 on mismatch, reveals nothing."""
+    if not SITE_SUBS_READ_KEY or not hmac.compare_digest(
+            key, SITE_SUBS_READ_KEY):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    email = (payload.get("email") or "").strip().lower()
+    con = _subs_db()
+    try:
+        invite = _ensure_invite(con, email)
+        con.commit()
+        row = con.execute(
+            """SELECT email, plan, status, stripe_customer_id,
+               stripe_subscription_id, checkout_session_id, invite_link,
+               current_period_end, created_ts, updated_ts, tv_username
+               FROM site_subs WHERE email=?""", (email,)).fetchone()
+    finally:
+        con.close()
+    if not row:
+        return JSONResponse({"detail": "no such subscriber"},
+                            status_code=404)
+    cols = ("email", "plan", "status", "stripe_customer_id",
+            "stripe_subscription_id", "checkout_session_id", "invite_link",
+            "current_period_end", "created_ts", "updated_ts", "tv_username")
+    return dict(zip(cols, row))
 
 
 # ---------- website support chatbot (POST /support-chat) ----------
