@@ -1987,7 +1987,7 @@ def _self_heal_subs():
                            checkout_session_id, invite_link,
                            current_period_end, created_ts, updated_ts,
                            tv_username, welcome_sent_ts)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(email) DO UPDATE SET
                          plan=excluded.plan,
                          status=CASE WHEN site_subs.status='refunded'
