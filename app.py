@@ -903,6 +903,31 @@ def _ensure_invite(con, email):
     return invite
 
 
+def _stripe_sub_period_end(sub_id):
+    """Fetch a subscription from the Stripe API and return its
+    current period end - top level, or items[0] on newer API versions
+    (the field moved there). None without an API key or on failure.
+    The checkout session itself carries no period end, and a fresh
+    subscription may not emit an updated event for days, so checkout
+    completion backfills from the API instead of storing NULL."""
+    if not STRIPE_SECRET_KEY or not sub_id or SBYB_TEST_MODE:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"https://api.stripe.com/v1/subscriptions/{sub_id}")
+        req.add_header("Authorization", f"Bearer {STRIPE_SECRET_KEY}")
+        sub = json.loads(urllib.request.urlopen(req, timeout=15).read())
+        if sub.get("current_period_end"):
+            return sub["current_period_end"]
+        items = (sub.get("items") or {}).get("data") or []
+        if items:
+            return items[0].get("current_period_end")
+    except Exception as e:
+        print(f"[stripe] period-end fetch failed for {sub_id}: {e}",
+              flush=True)
+    return None
+
+
 def _sub_plan(obj, session=None):
     meta = (session or obj).get("metadata") or {}
     if meta.get("plan"):
@@ -945,6 +970,7 @@ def _on_checkout_completed(con, obj):
     elif not invite or (row and row[1] in ("canceled", "unpaid", "refunded")):
         invite = _make_site_invite(email) or invite
     now = time.time()
+    period_end = _stripe_sub_period_end(obj.get("subscription"))
     con.execute(
         """INSERT INTO site_subs(email, plan, status, stripe_customer_id,
                stripe_subscription_id, checkout_session_id, invite_link,
@@ -955,13 +981,15 @@ def _on_checkout_completed(con, obj):
              stripe_customer_id=excluded.stripe_customer_id,
              checkout_session_id=excluded.checkout_session_id,
              invite_link=excluded.invite_link, updated_ts=excluded.updated_ts,
+             current_period_end=COALESCE(excluded.current_period_end,
+                 site_subs.current_period_end),
              stripe_subscription_id=COALESCE(
                  excluded.stripe_subscription_id,
                  site_subs.stripe_subscription_id),
              tv_username=COALESCE(excluded.tv_username, site_subs.tv_username)""",
         (email, plan, status, obj.get("customer"),
-         obj.get("subscription"), obj.get("id"), invite, None, now, now,
-         tv_username))
+         obj.get("subscription"), obj.get("id"), invite, period_end,
+         now, now, tv_username))
     print(f"[stripe] checkout completed: {email} plan={plan} "
           f"status={status} session={obj.get('id')} "
           f"invite={'yes' if invite else 'NO'}", flush=True)
@@ -1151,26 +1179,33 @@ __BODY__
 </body></html>"""
 
 
+_GUIDE_LINE = (
+    '<div class="small">Need help setting up? '
+    '<a href="https://spybeforeyoubuytrading.com/#guide">'
+    "Read the step-by-step guide.</a></div>")
+
+
 def _access_steps(tv_note=""):
     """The two simple steps every full-plan buyer follows - email
-    first (that path survives a lost tab), TradingView second."""
+    first (that path survives a lost tab), TradingView second. Copy
+    tightened to Justin's wording Nov 1 2026."""
     return (
-        "<p>Two quick steps and you have everything:</p>"
+        "<p>Your payment worked. Two quick steps and you have "
+        "everything:</p>"
         "<ol class=\"steps\">"
-        "<li><b>Join the Telegram channel.</b> Your private access link "
-        "is on its way to the email you paid with - look for an email "
-        "from SpyBeforeYouBuy called \"Your SpyBeforeYouBuy access is "
-        "ready\". Tap the link in that email to join. If it is not in "
-        "your inbox after about 20 minutes, check your spam folder.</li>"
-        "<li><b>Switch on your TradingView indicators.</b> If you have "
-        "a TradingView account, tap the button below and enter your "
-        "username. If you do not have one yet, make a free account at "
-        "tradingview.com first, then come back and enter your username "
-        "the same way.</li></ol>"
+        "<li><b>Join the Telegram channel.</b> Your private link is in "
+        "an email called \"Your SpyBeforeYouBuy access is ready\" - "
+        "tap the link in it to join. Not there in about 20 minutes? "
+        "Check your spam folder.</li>"
+        "<li><b>Switch on your TradingView indicators.</b> Tap the "
+        "button below and enter your username. No account yet? Make a "
+        "free one at tradingview.com first, then come back and enter "
+        "it the same way.</li></ol>"
         f"{tv_note}"
         '<a class="btn" href="/tradingview">'
         "ENTER MY TRADINGVIEW USERNAME</a>"
-        f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>')
+        f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>'
+        f"{_GUIDE_LINE}")
 
 
 @app.get("/access", response_class=HTMLResponse)
@@ -1213,7 +1248,8 @@ def access_page(session_id: str = ""):
             '<a class="btn" href="/tradingview">'
             "ENTER MY TRADINGVIEW USERNAME</a>"
             f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>'
-            f'<div class="small">Plan: {row[1]} - {row[0]}</div>')
+            f'<div class="small">Plan: {row[1]} - {row[0]}</div>'
+            f"{_GUIDE_LINE}")
     elif row:
         tv_note = (
             f'<p class="small" style="margin-top:0">TradingView username '
@@ -1232,13 +1268,10 @@ def access_page(session_id: str = ""):
         portal = (f'<div class="small"><a href="{STRIPE_PORTAL_URL}">'
                   f"Manage or upgrade my subscription</a></div>"
                   if STRIPE_PORTAL_URL else "")
-        body = ('<div class="big">You are in - your payment worked.</div>'
+        body = ('<div class="big">You are in.</div>'
                 f"{personal}{_access_steps(tv_note)}{portal}")
     else:
         body = ('<div class="big">Almost there.</div>'
-                "<p>If you just paid, your payment went through and "
-                "your access email is on its way to the email you paid "
-                "with. Here is what happens next:</p>"
                 f"{_access_steps()}")
     return ACCESS_PAGE.replace("__BODY__", body)
 
@@ -1331,6 +1364,16 @@ def stripe_repair_invite(payload: dict, key: str = ""):
     con = _subs_db()
     try:
         invite = _ensure_invite(con, email)
+        # Also backfill a missing period end from the Stripe API.
+        cur = con.execute(
+            "SELECT stripe_subscription_id, current_period_end "
+            "FROM site_subs WHERE email=?", (email,)).fetchone()
+        if cur and cur[0] and not cur[1]:
+            period_end = _stripe_sub_period_end(cur[0])
+            if period_end:
+                con.execute(
+                    "UPDATE site_subs SET current_period_end=? "
+                    "WHERE email=?", (period_end, email))
         con.commit()
         row = con.execute(
             """SELECT email, plan, status, stripe_customer_id,
@@ -1345,6 +1388,38 @@ def stripe_repair_invite(payload: dict, key: str = ""):
     cols = ("email", "plan", "status", "stripe_customer_id",
             "stripe_subscription_id", "checkout_session_id", "invite_link",
             "current_period_end", "created_ts", "updated_ts", "tv_username")
+    return dict(zip(cols, row))
+
+
+@app.post("/stripe/restore-sub")
+def stripe_restore_sub(payload: dict, key: str = ""):
+    """Keyed recovery: upsert one full subscriber row verbatim. The
+    app database resets on every redeploy; this puts a snapshotted
+    record back exactly as it was. Same key guard as /stripe/subs."""
+    if not SITE_SUBS_READ_KEY or not hmac.compare_digest(
+            key, SITE_SUBS_READ_KEY):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    email = (payload.get("email") or "").strip().lower()
+    if not email:
+        return JSONResponse({"detail": "email required"}, status_code=400)
+    cols = ("email", "plan", "status", "stripe_customer_id",
+            "stripe_subscription_id", "checkout_session_id", "invite_link",
+            "current_period_end", "created_ts", "updated_ts", "tv_username")
+    vals = [email] + [payload.get(c) for c in cols[1:]]
+    con = _subs_db()
+    try:
+        con.execute(
+            f"""INSERT INTO site_subs({','.join(cols)})
+                VALUES({','.join('?' * len(cols))})
+                ON CONFLICT(email) DO UPDATE SET
+                {','.join(c + '=excluded.' + c for c in cols[1:])}""",
+            vals)
+        con.commit()
+        row = con.execute(
+            f"SELECT {','.join(cols)} FROM site_subs WHERE email=?",
+            (email,)).fetchone()
+    finally:
+        con.close()
     return dict(zip(cols, row))
 
 
