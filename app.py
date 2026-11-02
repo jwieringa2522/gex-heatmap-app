@@ -1473,7 +1473,7 @@ def _welcome_compose(sub: dict) -> tuple[str, str]:
 
 If this landed in your spam or junk folder, move it to your inbox first - the links below will not work properly from spam.
 
-One step and you are set: enter your TradingView username so I can switch your indicators on:
+Entered your TradingView username at checkout? You are already set - skip this step. If you skipped it, enter it here so I can switch your indicators on:
 {GATE_BASE}/tradingview
 
 If you do not have a TradingView account yet, make a free one at tradingview.com first, then enter your username at the same link.
@@ -1495,7 +1495,7 @@ Tap your personal access link:
 It works once and it is tied to your subscription, so keep it to yourself.
 
 Step 2 - Switch on your TradingView indicators
-Enter your TradingView username here so I can switch your indicators on:
+Entered your TradingView username at checkout? You are already set - skip this step. If you skipped it, enter it here so I can switch your indicators on:
 {GATE_BASE}/tradingview
 If you do not have a TradingView account yet, make a free one at tradingview.com first, then enter your username at the same link.
 
