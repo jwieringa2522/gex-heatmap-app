@@ -183,19 +183,23 @@ def describe(d):
         pts.append(f"Put wall ${pw_s:g} ({_fmt_cell(pw_v)}) vs call wall "
                    f"${cw_s:g} ({_fmt_cell(cw_v)}) - {dom}")
     elif pw_s is not None:
-        pts.append(f"Put wall ${pw_s:g} ({_fmt_cell(pw_v)}) below, no real call wall above")
+        pts.append(f"Put wall ${pw_s:g} ({_fmt_cell(pw_v)}), no real call wall on this chain")
     elif cw_s is not None:
-        pts.append(f"Call wall ${cw_s:g} ({_fmt_cell(cw_v)}) above, no real put wall below")
+        pts.append(f"Call wall ${cw_s:g} ({_fmt_cell(cw_v)}), no real put wall on this chain")
 
     # 2. Where price sits + key expiry concentration.
     pos = f"Price ${spot:.2f}"
     if pw_s is not None and cw_s is not None:
-        if spot <= pw_s * 1.03:
+        if pw_s <= spot <= pw_s * 1.03:
             pos += f" pressing the ${pw_s:g} put wall"
-        elif spot >= cw_s * 0.97:
+        elif cw_s * 0.97 <= spot <= cw_s:
             pos += f" pressing the ${cw_s:g} call wall"
-        else:
+        elif min(pw_s, cw_s) <= spot <= max(pw_s, cw_s):
             pos += " between the walls"
+        elif spot < min(pw_s, cw_s):
+            pos += " below both walls"
+        else:
+            pos += " above both walls"
     bit = ""
     if (big["strike"] is not None and big["expiry"] is not None
             and big["strike"] in d["strikes"]):
@@ -225,9 +229,9 @@ def describe(d):
         else:
             lean = ("NEUTRAL", None, "walls evenly matched - expect chop")
     elif pw_s is not None:
-        lean = ("BEARISH", "puts", "only real wall is below")
+        lean = ("BEARISH", "puts", "only real wall is the put wall")
     elif cw_s is not None:
-        lean = ("BULLISH", "calls", "only real wall is above")
+        lean = ("BULLISH", "calls", "only real wall is the call wall")
     else:
         lean = ("NEUTRAL", None, "no clear walls")
     if lean[1]:
