@@ -1584,6 +1584,39 @@ def stripe_restore_sub(payload: dict, key: str = ""):
     return dict(zip(cols, row))
 
 
+@app.post("/stripe/delete-sub")
+def stripe_delete_sub(payload: dict, key: str = ""):
+    """Keyed teardown: delete one subscriber row by email. When the
+    payload also names a stripe_subscription_id, the row is deleted
+    only if its stored subscription id matches - a fresh signup under
+    the same email is never wiped by a stale teardown. Same key guard
+    as /stripe/subs."""
+    if not SITE_SUBS_READ_KEY or not hmac.compare_digest(
+            key, SITE_SUBS_READ_KEY):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    email = (payload.get("email") or "").strip().lower()
+    if not email:
+        return JSONResponse({"detail": "email required"}, status_code=400)
+    want_sub = (payload.get("stripe_subscription_id") or "").strip()
+    con = _subs_db()
+    try:
+        row = con.execute(
+            "SELECT stripe_subscription_id FROM site_subs WHERE email=?",
+            (email,)).fetchone()
+        if row is None:
+            return {"email": email, "deleted": False, "reason": "absent"}
+        if want_sub and (row[0] or "") != want_sub:
+            return {"email": email, "deleted": False,
+                    "reason": "subscription mismatch"}
+        con.execute("DELETE FROM site_subs WHERE email=?", (email,))
+        con.commit()
+    finally:
+        con.close()
+    print(f"[stripe] deleted site_subs row for {email} "
+          f"(sub {want_sub or 'any'})", flush=True)
+    return {"email": email, "deleted": True}
+
+
 # ---------- website support chatbot (POST /support-chat) ----------
 # Scripted intent core built from the site's own FAQ + Setup Guide and
 # the fixed plan facts. Off-script questions fall through to Google
