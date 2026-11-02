@@ -125,6 +125,32 @@ def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
             if abs(v) > abs(big[2]):
                 big = (s, ed, v)
 
+    # Zero-gamma flip: the price where the cumulative net GEX, summed
+    # strike by strike from the lowest strike up, changes sign -
+    # linear-interpolated between the two strikes that bracket the
+    # crossing. Above the flip dealers are net long gamma (their
+    # hedging dampens moves); below it net short (hedging amplifies
+    # moves). If the cumulative sum never crosses zero there is no
+    # flip on this chain: None, and nothing is shown rather than a
+    # faked level. If it crosses more than once, the crossing nearest
+    # spot is the one acting on the current price.
+    gamma_flip = None
+    _crossings = []
+    _cum = 0.0
+    _prev_s = None
+    for _s in sorted(totals_all):
+        _new = _cum + totals_all[_s]
+        if _prev_s is not None:
+            if _cum == 0.0:
+                _crossings.append(_prev_s)
+            elif _new != 0.0 and (_cum < 0) != (_new < 0):
+                _f = abs(_cum) / (abs(_cum) + abs(_new))
+                _crossings.append(_prev_s + _f * (_s - _prev_s))
+        _cum = _new
+        _prev_s = _s
+    if _crossings:
+        gamma_flip = min(_crossings, key=lambda x: abs(x - spot))
+
     return {
         "ticker": ticker.upper(),
         "spot": spot,
@@ -143,6 +169,7 @@ def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
         "bull_strike": bull_strike,
         "bear_strike": bear_strike,
         "biggest_cell": {"strike": big[0], "expiry": big[1], "value": big[2]},
+        "gamma_flip": gamma_flip,
     }
 
 
