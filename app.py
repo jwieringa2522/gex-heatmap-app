@@ -52,6 +52,14 @@ signer = URLSafeSerializer(SESSION_SECRET)
 app = FastAPI(title="SBYB GEX Heatmap")
 
 
+@app.on_event("startup")
+def _startup_self_heal():
+    """Boot-time subscription self-heal runs in a thread so app
+    startup is never blocked on Stripe. Defined here, resolved at
+    startup (after the whole module has loaded)."""
+    threading.Thread(target=_self_heal_subs, daemon=True).start()
+
+
 # ---------- telegram ----------
 def verify_tg_auth(params: dict) -> dict | None:
     """Verify Telegram Login Widget data. Returns user dict or None."""
@@ -1802,6 +1810,90 @@ def stripe_rebuild_from_email(payload: dict, key: str = ""):
             "stripe_subscription_id", "checkout_session_id", "invite_link",
             "current_period_end", "tv_username", "welcome_sent_ts")
     return dict(zip(cols, row))
+
+
+def _self_heal_subs():
+    """Boot-time self-heal: refresh site_subs from the Stripe
+    subscription list so a redeploy (which resets the app database)
+    can never permanently eat a customer. Idempotent upserts -
+    local-only fields (invite link, TradingView username, welcome
+    marker, checkout session id) are preserved on rows that already
+    exist, a local 'refunded' status is never overwritten, and new
+    rows get their Telegram invite minted by the usual guard.
+    Lifetime one-time payments have no subscription to rebuild
+    from; those rows still rely on snapshot restore. Never raises:
+    a Stripe outage must not stop the app from booting."""
+    if not STRIPE_SECRET_KEY or SBYB_TEST_MODE:
+        return
+    try:
+        subs, cursor = [], None
+        for _ in range(5):
+            path = "subscriptions?status=all&limit=100" \
+                   "&expand[]=data.customer"
+            if cursor:
+                path += f"&starting_after={cursor}"
+            page = _stripe_get(path)
+            data = page.get("data") or []
+            subs.extend(data)
+            if not page.get("has_more") or not data:
+                break
+            cursor = data[-1].get("id")
+        now = time.time()
+        healed = 0
+        con = _subs_db()
+        try:
+            for sub in subs:
+                customer = sub.get("customer") or {}
+                if not isinstance(customer, dict):
+                    continue
+                email = (customer.get("email") or "").strip().lower()
+                if not email:
+                    continue
+                items = (sub.get("items") or {}).get("data") or []
+                price = (items[0].get("price") or {}) if items else {}
+                plan = ((sub.get("metadata") or {}).get("plan")
+                        or STRIPE_PLAN_MAP.get(price.get("id") or "")
+                        or STRIPE_PLAN_MAP.get(
+                            str(price.get("unit_amount") or ""))
+                        or "Membership")
+                period_end = sub.get("current_period_end") or (
+                    items[0].get("current_period_end") if items else None)
+                con.execute(
+                    """INSERT INTO site_subs(email, plan, status,
+                           stripe_customer_id, stripe_subscription_id,
+                           checkout_session_id, invite_link,
+                           current_period_end, created_ts, updated_ts,
+                           tv_username)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(email) DO UPDATE SET
+                         plan=excluded.plan,
+                         status=CASE WHEN site_subs.status='refunded'
+                                     THEN site_subs.status
+                                     ELSE excluded.status END,
+                         stripe_customer_id=excluded.stripe_customer_id,
+                         stripe_subscription_id=
+                             excluded.stripe_subscription_id,
+                         current_period_end=COALESCE(
+                             excluded.current_period_end,
+                             site_subs.current_period_end),
+                         updated_ts=excluded.updated_ts""",
+                    (email, plan, sub.get("status"), customer.get("id"),
+                     sub.get("id"), None, None, period_end, now, now,
+                     None))
+                healed += 1
+            con.commit()
+            for sub in subs:
+                customer = sub.get("customer") or {}
+                if isinstance(customer, dict) and customer.get("email"):
+                    _ensure_invite(
+                        con, customer["email"].strip().lower())
+            con.commit()
+        finally:
+            con.close()
+        print(f"[stripe] self-heal: {len(subs)} subscriptions seen, "
+              f"{healed} rows upserted", flush=True)
+    except Exception as e:
+        print(f"[stripe] self-heal failed: {e}", flush=True)
 
 
 # ---------- website support chatbot (POST /support-chat) ----------
