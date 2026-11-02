@@ -820,6 +820,8 @@ def _subs_db():
     cols = {r[1] for r in con.execute("PRAGMA table_info(site_subs)")}
     if "tv_username" not in cols:
         con.execute("ALTER TABLE site_subs ADD COLUMN tv_username TEXT")
+    if "welcome_sent_ts" not in cols:
+        con.execute("ALTER TABLE site_subs ADD COLUMN welcome_sent_ts REAL")
     con.execute("""CREATE TABLE IF NOT EXISTS stripe_events(
         event_id TEXT PRIMARY KEY, type TEXT, ts REAL)""")
     con.execute("""CREATE TABLE IF NOT EXISTS tv_claims(
@@ -1342,13 +1344,15 @@ def stripe_subs(key: str = ""):
         rows = con.execute(
             """SELECT email, plan, status, stripe_customer_id,
                stripe_subscription_id, checkout_session_id, invite_link,
-               current_period_end, created_ts, updated_ts, tv_username
+               current_period_end, created_ts, updated_ts, tv_username,
+               welcome_sent_ts
                FROM site_subs""").fetchall()
     finally:
         con.close()
     cols = ("email", "plan", "status", "stripe_customer_id",
             "stripe_subscription_id", "checkout_session_id", "invite_link",
-            "current_period_end", "created_ts", "updated_ts", "tv_username")
+            "current_period_end", "created_ts", "updated_ts", "tv_username",
+            "welcome_sent_ts")
     return {"subs": [dict(zip(cols, r)) for r in rows]}
 
 
@@ -1391,6 +1395,147 @@ def stripe_repair_invite(payload: dict, key: str = ""):
     return dict(zip(cols, row))
 
 
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+WELCOME_FROM = "SpyBeforeYouBuy <support@spybeforeyoubuytrading.com>"
+WELCOME_SUBJECT = "Your SpyBeforeYouBuy access is ready"
+
+
+def _resend_send(to_email: str, subject: str, text: str) -> bool:
+    """Send one email through Resend from the support@ identity
+    (domain-authenticated, so it does not land in spam like the old
+    personal-Gmail sends). True on success; failures are logged."""
+    if SBYB_TEST_MODE:
+        print(f"[email] TEST MODE send to {to_email}: {subject}",
+              flush=True)
+        return True
+    if not RESEND_API_KEY:
+        print(f"[email] no RESEND_API_KEY - cannot send to {to_email}",
+              flush=True)
+        return False
+    try:
+        body = json.dumps({"from": WELCOME_FROM, "to": [to_email],
+                           "subject": subject, "text": text}).encode()
+        req = urllib.request.Request(
+            "https://api.resend.com/emails", data=body, method="POST")
+        req.add_header("Authorization", f"Bearer {RESEND_API_KEY}")
+        req.add_header("Content-Type", "application/json")
+        urllib.request.urlopen(req, timeout=20).read()
+        return True
+    except Exception as e:
+        print(f"[email] Resend send failed for {to_email}: {e}",
+              flush=True)
+        return False
+
+
+def _welcome_compose(sub: dict) -> tuple[str, str]:
+    """The welcome email copy - single source of truth (moved here
+    from welcome_email.py, wording unchanged)."""
+    plan = sub.get("plan") or "Membership"
+    status = sub.get("status") or ""
+    trial = ("\nYour 7-day free trial has started. Your card is only "
+             "charged if you stay past the trial."
+             if status == "trialing" else "")
+    if plan == IO_PLAN:
+        body = f"""Hi - thanks for joining SpyBeforeYouBuy. Your Indicators Only plan is active.{trial}
+
+One step and you are set: enter your TradingView username so I can switch your indicators on:
+{GATE_BASE}/tradingview
+
+If you do not have a TradingView account yet, make a free one at tradingview.com first, then enter your username at the same link.
+
+Your indicators appear in TradingView under Indicators, then Invite-only scripts.
+
+Questions? Reply to this email or write to {SUPPORT_EMAIL} and I will get you sorted.
+
+- Justin
+SpyBeforeYouBuy"""
+        return WELCOME_SUBJECT, body
+    code = (sub.get("invite_link") or "").split("https://t.me/+", 1)[-1]
+    body = f"""Hi - thanks for joining SpyBeforeYouBuy. Your {plan} plan is active and your access is ready.{trial}
+
+Step 1 - Join the private Telegram channel
+Tap your personal access link:
+{GATE_BASE}/agree/{code}
+It works once and it is tied to your subscription, so keep it to yourself.
+
+Step 2 - Switch on your TradingView indicators
+Enter your TradingView username here so I can switch your indicators on:
+{GATE_BASE}/tradingview
+If you do not have a TradingView account yet, make a free one at tradingview.com first, then enter your username at the same link.
+
+Your indicators appear in TradingView under Indicators, then Invite-only scripts.
+
+Questions? Reply to this email or write to {SUPPORT_EMAIL} and I will get you sorted.
+
+- Justin
+SpyBeforeYouBuy"""
+    return WELCOME_SUBJECT, body
+
+
+def _key_ok(key: str) -> bool:
+    return bool(SITE_SUBS_READ_KEY) and hmac.compare_digest(
+        key, SITE_SUBS_READ_KEY)
+
+
+@app.post("/email/welcome-run")
+def email_welcome_run(key: str = ""):
+    """Keyed: send the welcome email to every subscriber whose record
+    is complete and who has not been welcomed yet. The VM cron hits
+    this every 15 minutes via welcome_email.py."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _subs_db()
+    sent, skipped = [], []
+    try:
+        rows = con.execute(
+            """SELECT email, plan, status, invite_link, welcome_sent_ts
+               FROM site_subs""").fetchall()
+        for email, plan, status, invite, sent_ts in rows:
+            if status not in TV_GOOD_STATUSES or sent_ts:
+                continue
+            if plan != IO_PLAN and not invite:
+                skipped.append({"email": email,
+                                "reason": "invite link not on file yet"})
+                continue
+            subject, body = _welcome_compose(
+                {"plan": plan, "status": status, "invite_link": invite})
+            if _resend_send(email, subject, body):
+                con.execute(
+                    "UPDATE site_subs SET welcome_sent_ts=? "
+                    "WHERE email=?", (time.time(), email))
+                con.commit()
+                sent.append({"email": email, "plan": plan})
+            else:
+                skipped.append({"email": email,
+                                "reason": "send failed - see app logs"})
+    finally:
+        con.close()
+    return {"sent": sent, "skipped": skipped}
+
+
+@app.post("/email/test-welcome")
+def email_test_welcome(payload: dict, key: str = ""):
+    """Keyed: one-off [TEST] welcome for one subscriber on file -
+    ignores and does not set the welcomed flag."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    email = (payload.get("email") or "").strip().lower()
+    con = _subs_db()
+    try:
+        row = con.execute(
+            "SELECT plan, status, invite_link FROM site_subs "
+            "WHERE email=?", (email,)).fetchone()
+    finally:
+        con.close()
+    if not row:
+        return JSONResponse({"detail": "no such subscriber"},
+                            status_code=404)
+    subject, body = _welcome_compose(
+        {"plan": row[0], "status": row[1], "invite_link": row[2]})
+    ok = _resend_send(email, "[TEST] " + subject, body)
+    return {"sent": ok, "to": email, "from": WELCOME_FROM}
+
+
 @app.post("/stripe/restore-sub")
 def stripe_restore_sub(payload: dict, key: str = ""):
     """Keyed recovery: upsert one full subscriber row verbatim. The
@@ -1404,7 +1549,8 @@ def stripe_restore_sub(payload: dict, key: str = ""):
         return JSONResponse({"detail": "email required"}, status_code=400)
     cols = ("email", "plan", "status", "stripe_customer_id",
             "stripe_subscription_id", "checkout_session_id", "invite_link",
-            "current_period_end", "created_ts", "updated_ts", "tv_username")
+            "current_period_end", "created_ts", "updated_ts", "tv_username",
+            "welcome_sent_ts")
     vals = [email] + [payload.get(c) for c in cols[1:]]
     con = _subs_db()
     try:
