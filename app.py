@@ -633,23 +633,17 @@ MANIFEST = {
                     "walls are on any ticker."),
     "start_url": "/",
     "scope": "/",
-    # Links to this domain (the /agree/<code> gate links in welcome
-    # emails, /access, /tradingview) must open in the browser, NOT in
-    # the installed app - otherwise Android shows the app's launch
-    # screen (big GEX logo on black) before the page. With
-    # "not-preferred" the app opens only from its home-screen icon.
-    "handle_links": "not-preferred",
     "display": "standalone",
     "background_color": "#000000",
     "theme_color": "#000000",
     "icons": [
-        # Plain icon paths, deliberately: the ?v=2 versioned srcs
-        # shipped Nov 2 were re-minted into Justin's installed app
-        # the same evening and that package would no longer open.
-        # Reverted the same night - never version the icon srcs
-        # again. (The src change itself is a tracked manifest diff,
-        # so this revert also re-mints installed apps back onto the
-        # working manifest, handle_links included.)
+        # Plain icon paths, deliberately - and this manifest stays
+        # in its pre-Nov-2 shape on Justin's order ('leave the GEX
+        # app as-is'). Two Nov 2 experiments were reverted the same
+        # night: handle_links 'not-preferred' (link rule) and the
+        # ?v=2 versioned icon srcs, the latter re-minted into an
+        # installed app that would no longer open. Do not change
+        # this manifest casually again.
         {"src": "/icons/icon-192.png", "sizes": "192x192",
          "type": "image/png", "purpose": "any"},
         {"src": "/icons/icon-512.png", "sizes": "512x512",
