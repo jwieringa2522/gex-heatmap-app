@@ -866,6 +866,15 @@ def _subs_db():
     con.execute("""CREATE TABLE IF NOT EXISTS telegram_joins(
         email TEXT PRIMARY KEY, status TEXT, tg_username TEXT,
         joined_at TEXT, updated_ts REAL)""")
+    # X-subscriber mirror for the owner dashboard (Nov 2 2026
+    # addendum). X subs are a SEPARATE plan from website subs: no
+    # Stripe, no site_subs row - they live in the VM roster
+    # (roster.db, source='x', Justin confirms in/out). site_sync
+    # pushes a full snapshot here through the same keyed endpoint;
+    # a redeploy wipes the mirror and the next sync refills it.
+    con.execute("""CREATE TABLE IF NOT EXISTS x_subs(
+        handle TEXT PRIMARY KEY, status TEXT, tg_username TEXT,
+        created_at TEXT, joined_at TEXT, updated_ts REAL)""")
     return con
 
 
@@ -1475,6 +1484,13 @@ def stripe_telegram_status(payload: dict, key: str = ""):
     joins = payload.get("joins") or []
     if not isinstance(joins, list):
         return JSONResponse({"detail": "bad payload"}, status_code=400)
+    # Optional full snapshot of the roster's X subscribers (separate
+    # plan). Present = replace the mirror with exactly this list, so
+    # handles deleted from the roster disappear here too. Absent =
+    # leave the mirror untouched (older pushers).
+    x_subs = payload.get("x_subs")
+    if x_subs is not None and not isinstance(x_subs, list):
+        return JSONResponse({"detail": "bad payload"}, status_code=400)
     con = _subs_db()
     try:
         n = 0
@@ -1496,10 +1512,30 @@ def stripe_telegram_status(payload: dict, key: str = ""):
                  (j.get("tg_username") or "")[:64] or None,
                  (j.get("joined_at") or "")[:32] or None, time.time()))
             n += 1
+        nx = None
+        if x_subs is not None:
+            con.execute("DELETE FROM x_subs")
+            nx = 0
+            for x in x_subs:
+                if not isinstance(x, dict):
+                    continue
+                handle = (x.get("handle") or "").strip()[:128]
+                if not handle:
+                    continue
+                con.execute(
+                    """INSERT INTO x_subs(handle, status, tg_username,
+                           created_at, joined_at, updated_ts)
+                       VALUES(?,?,?,?,?,?)""",
+                    (handle, (x.get("status") or "")[:32],
+                     (x.get("tg_username") or "")[:64] or None,
+                     (x.get("created_at") or "")[:32] or None,
+                     (x.get("joined_at") or "")[:32] or None,
+                     time.time()))
+                nx += 1
         con.commit()
     finally:
         con.close()
-    return {"stored": n}
+    return {"stored": n, "x_stored": nx}
 
 
 # ---------- owner dashboard (read-only, keyed) ----------
@@ -1568,16 +1604,27 @@ gap:8px 18px;margin-top:12px}
 padding:1px 7px;font-size:12px;margin:1px 2px 1px 0}
 .chip.red{background:#7c2d12;color:#fed7aa}
 .mut{color:#8fa3ad}
+h2{font-size:19px;margin:28px 0 2px}
+.secnote{color:#8fa3ad;font-size:13px;margin-bottom:14px}
 .foot{color:#637a84;font-size:12px;margin-top:20px;line-height:1.6}
 </style></head><body><div class="wrap">
 <div class="brand">SPY BEFORE YOU BUY</div>
 <h1>Subscribers</h1>
 <div class="sub">Private dashboard - read only. __UPDATED__</div>
+<h2>Website subscribers</h2>
+<div class="secnote">From the Stripe-backed registry - trials, refunds
+and period timing live here.</div>
 __STRIP__
 __CARDS__
-<div class="foot">Actions (cancel, refund) stay in Stripe. Telegram shows
-Joined when the roster sync has seen the join, otherwise Invite sent from
-the invite link on file.</div>
+<h2>X subscribers</h2>
+<div class="secnote">Separate plan, billed on X - tracked in the
+Telegram roster, confirmed in and out by Justin. Nothing below is a
+website subscription.</div>
+__XSECTION__
+<div class="foot">Actions (cancel, refund) stay in Stripe for website
+subscribers. Telegram shows Joined when the roster sync has seen the
+join, otherwise Invite sent from the invite link on file. X data is a
+snapshot the roster sync pushes every 15 minutes.</div>
 </div></body></html>"""
 
 
@@ -1588,7 +1635,7 @@ def dashboard(key: str = ""):
     unconfigured, and the page itself is noindex."""
     if not _key_ok(key):
         return HTMLResponse("Not found", status_code=404)
-    from datetime import datetime
+    from datetime import datetime, timezone
     from html import escape as _esc
     from zoneinfo import ZoneInfo
     tz = ZoneInfo("America/Winnipeg")
@@ -1606,6 +1653,9 @@ def dashboard(key: str = ""):
             "FROM identity_flags WHERE kind='email'")}
         joins = {r[0]: (r[1], r[2]) for r in con.execute(
             "SELECT email, status, tg_username FROM telegram_joins")}
+        xrows = con.execute(
+            """SELECT handle, status, tg_username, created_at, joined_at,
+               updated_ts FROM x_subs ORDER BY created_at""").fetchall()
     finally:
         con.close()
 
@@ -1718,12 +1768,76 @@ def dashboard(key: str = ""):
             "</div></div>")
     if not cards:
         cards.append('<div class="card">No subscribers yet.</div>')
+
+    # --- X subscribers section (separate plan, roster-fed) ---
+    def fmt_iso(s):
+        if not s:
+            return None
+        try:
+            d = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        d = d.astimezone(tz)
+        return f"{d.strftime('%b')} {d.day}, {d.year}"
+
+    if not xrows:
+        xsection = ('<div class="card"><span class="mut">No X subscriber '
+                    "data synced yet - the roster sync pushes it every "
+                    "15 minutes.</span></div>")
+    else:
+        x_counts = {}
+        for xr in xrows:
+            x_counts[xr[1] or "unknown"] = \
+                x_counts.get(xr[1] or "unknown", 0) + 1
+        x_tiles = [
+            (str(x_counts.get("active", 0)), "In"),
+            (str(x_counts.get("pending", 0)), "Invite sent"),
+            (str(x_counts.get("removed", 0)), "Out"),
+        ]
+        xsection = '<div class="strip">' + "".join(
+            f'<div class="tile"><div class="n">{_esc(n)}</div>'
+            f'<div class="k">{_esc(k)}</div></div>'
+            for n, k in x_tiles) + "</div>"
+        x_badges = {"active": ("In", "b-active"),
+                    "pending": ("Invite sent", "b-trialing"),
+                    "removed": ("Out", "b-canceled")}
+        for handle, xstatus, xtg, xcreated, xjoined, _xu in xrows:
+            blabel, bclass = x_badges.get(
+                xstatus or "", ((xstatus or "Unknown").title(), "b-other"))
+            added = fmt_iso(xcreated)
+            joined = fmt_iso(xjoined)
+            if xstatus == "active":
+                since = f"In since {joined or added or '-'}"
+            elif xstatus == "removed":
+                since = f"Added {added or '-'}"
+                if joined:
+                    since += f" - joined {joined}"
+            else:
+                since = f"Added {added or '-'}"
+            tg_line = f" - Telegram @{_esc(xtg)}" if xtg else ""
+            xsection += (
+                '<div class="card"><div class="top">'
+                f'<div class="email">{_esc(handle or "")}</div>'
+                f'<span class="badge {bclass}">{_esc(blabel)}</span></div>'
+                f'<div class="sub" style="margin:8px 0 0">'
+                f"{_esc(since)}{tg_line}</div></div>")
+        maxu = max((xr[5] or 0) for xr in xrows)
+        if maxu:
+            mu = datetime.fromtimestamp(maxu, tz)
+            xsection += (
+                '<div class="foot">Roster snapshot pushed '
+                f"{mu.strftime('%b')} {mu.day}, "
+                f"{mu.strftime('%I:%M %p')} Winnipeg.</div>")
+
     updated = datetime.fromtimestamp(now, tz).strftime("%b ") + \
         str(datetime.fromtimestamp(now, tz).day) + \
         datetime.fromtimestamp(now, tz).strftime(", %I:%M %p") + " Winnipeg"
     page = (DASHBOARD_PAGE.replace("__UPDATED__", f"Updated {updated}")
             .replace("__STRIP__", strip)
-            .replace("__CARDS__", "".join(cards)))
+            .replace("__CARDS__", "".join(cards))
+            .replace("__XSECTION__", xsection))
     return HTMLResponse(page, headers={
         "X-Robots-Tag": "noindex, nofollow",
         "Cache-Control": "no-store"})
