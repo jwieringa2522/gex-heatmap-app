@@ -844,6 +844,8 @@ def _subs_db():
         con.execute("ALTER TABLE site_subs ADD COLUMN welcome_sent_ts REAL")
     if "trial_repeat" not in cols:
         con.execute("ALTER TABLE site_subs ADD COLUMN trial_repeat INTEGER")
+    if "canceled_ts" not in cols:
+        con.execute("ALTER TABLE site_subs ADD COLUMN canceled_ts REAL")
     # One-trial / one-refund identity registry (Nov 2 2026). Local
     # mirror only - the durable stamps live on Stripe (subscription +
     # customer metadata) and this table is rebuilt from them at boot
@@ -875,6 +877,16 @@ def _subs_db():
     con.execute("""CREATE TABLE IF NOT EXISTS x_subs(
         handle TEXT PRIMARY KEY, status TEXT, tg_username TEXT,
         created_at TEXT, joined_at TEXT, updated_ts REAL)""")
+    # TradingView grant mirror for the owner dashboard (Nov 2 2026).
+    # Grants are executed by hand through Justin's TradingView (no TV
+    # API), so the record of who holds what lives in a small VM file
+    # (telegram-subscribers/tv_grants.json, maintained by the
+    # subscriptions hub when it grants or removes). site_sync pushes
+    # a full snapshot here; without a record for a subscriber's
+    # username the dashboard honestly shows the grant as pending.
+    con.execute("""CREATE TABLE IF NOT EXISTS tv_grants(
+        tv TEXT PRIMARY KEY, indicators TEXT, granted TEXT,
+        note TEXT, updated_ts REAL)""")
     return con
 
 
@@ -1181,8 +1193,10 @@ def _on_subscription_deleted(con, obj):
     if email:
         con.execute(
             """UPDATE site_subs SET status='canceled',
-               current_period_end=?, updated_ts=? WHERE email=?""",
+               current_period_end=?, canceled_ts=?, updated_ts=?
+               WHERE email=?""",
             (obj.get("current_period_end") or time.time(),
+             obj.get("canceled_at") or time.time(),
              time.time(), email))
 
 
@@ -1491,6 +1505,11 @@ def stripe_telegram_status(payload: dict, key: str = ""):
     x_subs = payload.get("x_subs")
     if x_subs is not None and not isinstance(x_subs, list):
         return JSONResponse({"detail": "bad payload"}, status_code=400)
+    # Optional full snapshot of TradingView grants (hub-maintained
+    # tv_grants.json on the VM). Same snapshot rules as x_subs.
+    tv_grants = payload.get("tv_grants")
+    if tv_grants is not None and not isinstance(tv_grants, list):
+        return JSONResponse({"detail": "bad payload"}, status_code=400)
     con = _subs_db()
     try:
         n = 0
@@ -1532,10 +1551,31 @@ def stripe_telegram_status(payload: dict, key: str = ""):
                      (x.get("joined_at") or "")[:32] or None,
                      time.time()))
                 nx += 1
+        ng = None
+        if tv_grants is not None:
+            con.execute("DELETE FROM tv_grants")
+            ng = 0
+            for g in tv_grants:
+                if not isinstance(g, dict):
+                    continue
+                tvn = _norm_tv(g.get("tv_username") or g.get("tv"))
+                if not tvn:
+                    continue
+                inds = g.get("indicators") or []
+                if not isinstance(inds, list):
+                    inds = [str(inds)]
+                con.execute(
+                    """INSERT INTO tv_grants(tv, indicators, granted,
+                           note, updated_ts) VALUES(?,?,?,?,?)""",
+                    (tvn, json.dumps([str(i)[:24] for i in inds][:12]),
+                     str(g.get("granted") or "")[:32] or None,
+                     str(g.get("note") or "")[:120] or None,
+                     time.time()))
+                ng += 1
         con.commit()
     finally:
         con.close()
-    return {"stored": n, "x_stored": nx}
+    return {"stored": n, "x_stored": nx, "grants_stored": ng}
 
 
 # ---------- owner dashboard (read-only, keyed) ----------
@@ -1550,6 +1590,20 @@ _PLAN_PRICES = {
     "Yearly": "$150/yr",
     "Lifetime": "$500 once",
     IO_PLAN: "$10/mo",
+}
+_PLAN_AMOUNTS = {
+    "Monthly": 20,
+    "Quarterly": 45,
+    "Yearly": 150,
+    "Lifetime": 500,
+    IO_PLAN: 10,
+}
+_PLAN_MONTHLY_EQ = {
+    "Monthly": 20,
+    "Quarterly": 15,
+    "Yearly": 12.5,
+    "Lifetime": 0,
+    IO_PLAN: 10,
 }
 _STATUS_LABELS = {
     "trialing": "Trialing",
@@ -1574,9 +1628,9 @@ padding:20px 14px 48px}
 .wrap{max-width:880px;margin:0 auto}
 .brand{color:#7fb3c8;font-weight:800;letter-spacing:2px;font-size:12px}
 h1{font-size:24px;margin:4px 0 2px}
-.sub{color:#8fa3ad;font-size:13px;margin-bottom:18px}
+.sub{color:#8fa3ad;font-size:13px;margin-bottom:18px;line-height:1.6}
 .strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));
-gap:10px;margin-bottom:20px}
+gap:10px;margin-bottom:14px}
 .tile{background:#0a151a;border:1px solid #175263;border-radius:12px;
 padding:12px 12px 10px}
 .tile .n{font-size:26px;font-weight:800;line-height:1}
@@ -1600,22 +1654,43 @@ font-size:12px;font-weight:700;letter-spacing:.4px;white-space:nowrap}
 gap:8px 18px;margin-top:12px}
 .f .k{color:#8fa3ad;font-size:11px;letter-spacing:1px;text-transform:uppercase}
 .f .v{font-size:14px;margin-top:2px;word-break:break-word}
+.f .v .s{display:block;color:#8fa3ad;font-size:12px;margin-top:1px}
 .chip{display:inline-block;background:#175263;color:#dff3fa;border-radius:6px;
 padding:1px 7px;font-size:12px;margin:1px 2px 1px 0}
 .chip.red{background:#7c2d12;color:#fed7aa}
 .mut{color:#8fa3ad}
 h2{font-size:19px;margin:28px 0 2px}
 .secnote{color:#8fa3ad;font-size:13px;margin-bottom:14px}
+.line{font-size:14px;color:#c9d4da;margin:3px 0;line-height:1.55}
+.attn{border:1px solid #8a6d1f;background:#171106;border-radius:12px;
+padding:6px 16px 10px;margin-bottom:6px}
+.aitem{padding:8px 0;border-top:1px solid #2a2110;font-size:14px;line-height:1.5}
+.aitem:first-child{border-top:none}
+.aitem .why{color:#f2c94c;font-weight:700}
+.controls{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+.controls input,.controls select{background:#0a151a;color:#e8ecef;
+border:1px solid #1d323c;border-radius:8px;padding:9px 10px;font-size:14px}
+.controls input{flex:1;min-width:170px}
+details{margin-top:10px}
+summary{cursor:pointer;color:#7fb3c8;font-size:13px}
+details .line{color:#8fa3ad;font-size:13px;word-break:break-all}
 .foot{color:#637a84;font-size:12px;margin-top:20px;line-height:1.6}
 </style></head><body><div class="wrap">
 <div class="brand">SPY BEFORE YOU BUY</div>
 <h1>Subscribers</h1>
-<div class="sub">Private dashboard - read only. __UPDATED__</div>
+<div class="sub">Private dashboard - read only.<br>__ASOF__</div>
+__ATTENTION__
 <h2>Website subscribers</h2>
 <div class="secnote">From the Stripe-backed registry - trials, refunds
 and period timing live here.</div>
+<div class="controls"><input id="q" type="search"
+placeholder="Search email, username, handle">
+<select id="fs"><option value="">All statuses</option>__STATUSOPTS__</select>
+<select id="fp"><option value="">All plans</option>__PLANOPTS__</select></div>
 __STRIP__
+__SUMMARY2__
 __CARDS__
+__GRANTSYNC__
 <h2>X subscribers</h2>
 <div class="secnote">Separate plan, billed on X - tracked in the
 Telegram roster, confirmed in and out by Justin. Nothing below is a
@@ -1623,9 +1698,25 @@ website subscription.</div>
 __XSECTION__
 <div class="foot">Actions (cancel, refund) stay in Stripe for website
 subscribers. Telegram shows Joined when the roster sync has seen the
-join, otherwise Invite sent from the invite link on file. X data is a
-snapshot the roster sync pushes every 15 minutes.</div>
-</div></body></html>"""
+join, otherwise Invite sent from the invite link on file. X, join and
+grant data are snapshots the roster sync pushes every 15 minutes.
+Next-charge amounts are the plan list prices.</div>
+</div>
+<script>
+var q=document.getElementById('q'),fs=document.getElementById('fs'),
+fp=document.getElementById('fp');
+function filt(){
+ var s=q.value.toLowerCase(),st=fs.value,pl=fp.value;
+ document.querySelectorAll('.card[data-search]').forEach(function(c){
+  var okS=!s||c.dataset.search.indexOf(s)>=0;
+  var isX=c.dataset.scope==='x';
+  var okSt=isX||!st||c.dataset.status===st;
+  var okPl=isX||!pl||c.dataset.plan===pl;
+  c.style.display=(okS&&okSt&&okPl)?'':'none';});
+}
+[q,fs,fp].forEach(function(e){e.addEventListener('input',filt);});
+</script>
+</body></html>"""
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -1646,7 +1737,8 @@ def dashboard(key: str = ""):
         rows = con.execute(
             """SELECT email, plan, status, invite_link,
                current_period_end, created_ts, tv_username,
-               welcome_sent_ts, trial_repeat
+               welcome_sent_ts, trial_repeat, stripe_customer_id,
+               stripe_subscription_id, canceled_ts
                FROM site_subs""").fetchall()
         flags = {r[0]: (r[1], r[2]) for r in con.execute(
             "SELECT key, trial_used_ts, refund_used_ts "
@@ -1656,71 +1748,139 @@ def dashboard(key: str = ""):
         xrows = con.execute(
             """SELECT handle, status, tg_username, created_at, joined_at,
                updated_ts FROM x_subs ORDER BY created_at""").fetchall()
+        grants = {}
+        grants_synced = None
+        for tvn, inds, granted, note, gu in con.execute(
+                "SELECT tv, indicators, granted, note, updated_ts "
+                "FROM tv_grants"):
+            try:
+                ilist = json.loads(inds or "[]")
+            except ValueError:
+                ilist = []
+            grants[tvn] = (ilist, granted, note)
+            grants_synced = max(grants_synced or 0, gu or 0) or None
+        claims = {}
+        for em, cts in con.execute(
+                "SELECT email, ts FROM tv_claims WHERE matched=1"):
+            claims[em] = max(claims.get(em, 0), cts or 0)
     finally:
         con.close()
 
-    def fmt_date(ts):
+    def dstr(ts, full=False):
         if not ts:
-            return None, None
+            return None
         d = datetime.fromtimestamp(ts, tz)
-        return d, f"{d.strftime('%b')} {d.day}"
+        s = f"{d.strftime('%b')} {d.day}"
+        return s + f", {d.year}" if full else s
 
-    def ends_text(status, ts):
-        d, label = fmt_date(ts)
-        if status == "lifetime" or (not ts and status == "lifetime"):
-            return "Lifetime - no end date"
+    def days_until(ts):
         if not ts:
-            return "-"
-        days = (d.date() - today).days
-        when = "Trial ends" if status == "trialing" else "Period ends"
-        if days < 0:
-            return f"{when} {label} - ended"
-        if days == 0:
-            return f"{when} {label} - today"
-        if days == 1:
-            return f"{when} {label} - 1 day left"
-        return f"{when} {label} - {days} days left"
+            return None
+        return (datetime.fromtimestamp(ts, tz).date() - today).days
 
+    def money(x):
+        return f"${x:,.0f}" if float(x) == int(x) else f"${x:,.2f}"
+
+    def left_text(days):
+        if days is None:
+            return ""
+        if days < 0:
+            return " - ended"
+        if days == 0:
+            return " - today"
+        if days == 1:
+            return " - 1 day left"
+        return f" - {days} days left"
+
+    GOOD = ("active", "trialing", "past_due", "lifetime")
     counts = {}
-    trials_soon = 0
-    paid_active = 0
-    for r in rows:
-        st = (r[2] or "unknown").lower()
-        counts[st] = counts.get(st, 0) + 1
-        if st in ("active", "lifetime"):
-            paid_active += 1
-        if st == "trialing" and r[4]:
-            dd = (datetime.fromtimestamp(r[4], tz).date() - today).days
-            if 0 <= dd <= 3:
-                trials_soon += 1
-    tiles = [
-        (str(len(rows)), "Subscribers"),
-        (str(paid_active), "Active paid"),
-        (str(counts.get("trialing", 0)), "Trialing"),
-        (str(trials_soon), "Trials ending in 3 days"),
-        (str(counts.get("past_due", 0)), "Past due"),
-        (str(counts.get("canceled", 0) + counts.get("refunded", 0)),
-         "Canceled / refunded"),
-    ]
-    strip = '<div class="strip">' + "".join(
-        f'<div class="tile{" warn" if k.startswith("Trials ending") and n != "0" else ""}">'
-        f'<div class="n">{_esc(n)}</div><div class="k">{_esc(k)}</div></div>'
-        for n, k in tiles) + "</div>"
+    plan_counts = {}
+    trials3 = trials7 = 0
+    renewals = []
+    conversions = []
+    mrr = 0.0
+    recent_cancels = []
+    attention = []  # (priority, email, why-html)
 
     def sort_key(r):
         return (r[4] is None, r[4] or 0, (r[0] or ""))
 
     cards = []
     for r in sorted(rows, key=sort_key):
-        (email, plan, status, invite, period_end, _created, tv,
-         welcomed, trial_repeat) = r
+        (email, plan, status, invite, period_end, created_ts, tv,
+         welcomed, trial_repeat, cust_id, sub_id, canceled_ts) = r
         st = (status or "unknown").lower()
+        counts[st] = counts.get(st, 0) + 1
+        plan_counts[plan or "-"] = plan_counts.get(plan or "-", 0) + 1
         label = _STATUS_LABELS.get(st, (status or "Unknown").title())
         price = _PLAN_PRICES.get(plan or "")
         plan_text = f"{plan or '-'} - {price}" if price else (plan or "-")
+        amt = _PLAN_AMOUNTS.get(plan or "")
         trial_ts, refund_ts = flags.get(email, (None, None))
+        du = days_until(period_end)
+
+        # --- billing / ends line ---
+        if plan == "Lifetime" or st == "lifetime":
+            paid = f"Paid {money(amt)}" if amt else "Paid in full"
+            if created_ts:
+                paid += f" on {dstr(created_ts, full=True)}"
+            billing = paid + " - no renewals"
+        elif st == "trialing":
+            billing = (f"Trial ends {dstr(period_end, full=True)}"
+                       f"{left_text(du)}")
+            if amt:
+                billing += f" - then {money(amt)}"
+            if du is not None and 0 <= du <= 7:
+                conversions.append((email, period_end, amt))
+            if du is not None and 0 <= du <= 3:
+                trials3 += 1
+            if du is not None and 0 <= du <= 7:
+                trials7 += 1
+        elif st in ("active", "past_due"):
+            billing = f"Next charge {dstr(period_end, full=True)}" \
+                      f"{left_text(du)}"
+            if amt:
+                billing += f" - {money(amt)}"
+            if du is not None and 0 <= du <= 7:
+                renewals.append((email, period_end, amt))
+            if st == "active" or st == "past_due":
+                mrr += _PLAN_MONTHLY_EQ.get(plan or "", 0)
+        elif st == "canceled":
+            if canceled_ts:
+                billing = f"Canceled {dstr(canceled_ts, full=True)}"
+            elif du is not None and du >= 0:
+                billing = f"Access until {dstr(period_end, full=True)}"
+            else:
+                billing = "Canceled"
+            if canceled_ts and now - canceled_ts <= 60 * 86400:
+                recent_cancels.append((email, "Canceled", canceled_ts))
+        elif st == "refunded":
+            billing = "Refunded"
+            ref_ts = refund_ts or canceled_ts
+            if ref_ts and now - ref_ts <= 60 * 86400:
+                recent_cancels.append((email, "Refunded", ref_ts))
+        else:
+            billing = (f"Period ends {dstr(period_end, full=True)}"
+                       if period_end else "-")
+
+        # --- signed up / membership length ---
+        if created_ts:
+            mdays = (today - datetime.fromtimestamp(
+                created_ts, tz).date()).days
+            if mdays <= 0:
+                mlen = "joined today"
+            elif mdays == 1:
+                mlen = "1 day in"
+            else:
+                mlen = f"{mdays} days in"
+            signup = f"{dstr(created_ts, full=True)} - {mlen}"
+        else:
+            signup = "-"
+
+        # --- telegram ---
         if plan == IO_PLAN:
             tg_text = '<span class="mut">No Telegram (indicators only)</span>'
+            tg_search = ""
         elif email in joins:
             jstatus, juser = joins[email]
             if jstatus == "active":
@@ -1729,15 +1889,36 @@ def dashboard(key: str = ""):
                 tg_text = "Removed"
             else:
                 tg_text = "Invite sent"
+            tg_search = juser or ""
         elif invite:
             tg_text = "Invite sent"
+            tg_search = ""
         else:
             tg_text = '<span class="mut">No invite yet</span>'
+            tg_search = ""
+
+        # --- tradingview + grant state ---
+        grant_rec = grants.get((tv or "").strip().lower()) if tv else None
+        if not tv:
+            tv_html = '<span class="mut">No username claimed</span>'
+        elif grant_rec:
+            inds = ", ".join(_esc(i) for i in grant_rec[0]) or "all"
+            tv_html = (f"{_esc(tv)}"
+                       f'<span class="s">Granted: {inds}</span>')
+        else:
+            tv_html = f"{_esc(tv)}" \
+                      '<span class="s">Grant pending</span>'
+
+        # --- welcome ---
         if welcomed:
-            wd, wlabel = fmt_date(welcomed)
-            welcome_text = f"Sent - {wlabel}"
+            welcome_text = f"Sent - {dstr(welcomed, full=True)}"
         else:
             welcome_text = '<span class="mut">Not sent</span>'
+
+        # --- card on file (best effort, cached) ---
+        card_text = _stripe_card_display(cust_id) or "-"
+
+        # --- flags ---
         chips = []
         if trial_ts:
             chips.append('<span class="chip">Trial used</span>')
@@ -1746,28 +1927,173 @@ def dashboard(key: str = ""):
         if trial_repeat:
             chips.append('<span class="chip red">Repeat trial</span>')
         flags_text = "".join(chips) if chips else '<span class="mut">-</span>'
-        tv_text = _esc(tv) if tv else \
-            '<span class="mut">Not entered</span>'
+
+        # --- needs-attention derivation ---
+        if st in ("past_due", "unpaid"):
+            attention.append((0, email,
+                                "Payment failed - status is "
+                                f"{label.lower()}"))
+        if st in GOOD:
+            if plan != IO_PLAN and joins:
+                js = joins.get(email, ("", None))[0]
+                if js != "active":
+                    attention.append(
+                        (2, email, "Has not joined Telegram yet"
+                         + (" (invite sent)" if invite or js == "pending"
+                            else "")))
+            if not tv:
+                attention.append(
+                    (3, email, "No TradingView username claimed yet"))
+            elif not grant_rec:
+                basis = claims.get(email) or created_ts
+                since = dstr(basis, full=True) if basis else "unknown"
+                over = basis and (now - basis) > 86400
+                attention.append(
+                    (1 if over else 2, email,
+                     f"Indicator grant pending - waiting since {since}"
+                     + (" - over 24 hours" if over else "")))
+            if not welcomed and created_ts and now - created_ts > 3600:
+                attention.append(
+                    (3, email, "Welcome email not sent yet"))
+
+        det = [f"Signup: {dstr(created_ts, full=True) or '-'}"]
+        if period_end:
+            det.append(f"Period end: {dstr(period_end, full=True)}")
+        if canceled_ts:
+            det.append(f"Canceled: {dstr(canceled_ts, full=True)}")
+        if grant_rec and grant_rec[2]:
+            det.append(f"Grant note: {_esc(grant_rec[2])}")
+        if grant_rec and grant_rec[1]:
+            det.append(f"Granted on: {_esc(str(grant_rec[1]))}")
+        if cust_id:
+            det.append(f"Stripe customer: {_esc(cust_id)}")
+        if sub_id:
+            det.append(f"Stripe subscription: {_esc(sub_id)}")
+        details = ("<details><summary>Details</summary>"
+                   + "".join(f'<div class="line">{d}</div>' for d in det)
+                   + "</details>")
+
+        search_text = _esc(
+            f"{email} {tv or ''} {tg_search}".lower())
         cards.append(
-            '<div class="card"><div class="top">'
+            f'<div class="card" data-scope="web" data-status="{_esc(st)}" '
+            f'data-plan="{_esc(plan or "")}" data-search="{search_text}">'
+            '<div class="top">'
             f'<div class="email">{_esc(email or "")}</div>'
             f'<span class="badge b-{_esc(st)}">{_esc(label)}</span></div>'
             '<div class="grid">'
             f'<div class="f"><div class="k">Plan</div>'
             f'<div class="v">{_esc(plan_text)}</div></div>'
-            f'<div class="f"><div class="k">Ends</div>'
-            f'<div class="v">{_esc(ends_text(st, period_end))}</div></div>'
+            f'<div class="f"><div class="k">Billing</div>'
+            f'<div class="v">{_esc(billing)}</div></div>'
+            f'<div class="f"><div class="k">Signed up</div>'
+            f'<div class="v">{_esc(signup)}</div></div>'
             f'<div class="f"><div class="k">TradingView</div>'
-            f'<div class="v">{tv_text}</div></div>'
+            f'<div class="v">{tv_html}</div></div>'
             f'<div class="f"><div class="k">Telegram</div>'
             f'<div class="v">{tg_text}</div></div>'
             f'<div class="f"><div class="k">Welcome email</div>'
             f'<div class="v">{welcome_text}</div></div>'
+            f'<div class="f"><div class="k">Card</div>'
+            f'<div class="v">{_esc(card_text)}</div></div>'
             f'<div class="f"><div class="k">Flags</div>'
             f'<div class="v">{flags_text}</div></div>'
-            "</div></div>")
+            "</div>"
+            f"{details}</div>")
+
+    paid_active = counts.get("active", 0) + counts.get("lifetime", 0)
+    tiles = [
+        (str(len(rows)), "Subscribers"),
+        (str(paid_active), "Active paid"),
+        (str(counts.get("trialing", 0)), "Trialing"),
+        (str(trials3), "Trials ending in 3 days"),
+        (str(counts.get("past_due", 0) + counts.get("unpaid", 0)),
+         "Past due"),
+        (str(counts.get("canceled", 0) + counts.get("refunded", 0)),
+         "Canceled / refunded"),
+    ]
+    strip = '<div class="strip">' + "".join(
+        f'<div class="tile{" warn" if k.startswith("Trials ending") and n != "0" else ""}">'
+        f'<div class="n">{_esc(n)}</div><div class="k">{_esc(k)}</div></div>'
+        for n, k in tiles) + "</div>"
+
+    # --- summary level 2: by plan, 7-day money, MRR, cancellations ---
+    s2 = []
+    if plan_counts:
+        by_plan = " · ".join(
+            f"{_esc(p)} {c}" for p, c in sorted(plan_counts.items()))
+        s2.append(f'<div class="line">By plan: {by_plan}</div>')
+    tiles2 = [
+        (str(trials7), "Trials ending in 7 days"),
+        (str(len(renewals)), "Renewals due in 7 days"),
+        (str(len(conversions)), "Trial conversions in 7 days"),
+        (money(mrr), "Est. monthly recurring"),
+    ]
+    s2.append('<div class="strip">' + "".join(
+        f'<div class="tile"><div class="n">{_esc(n)}</div>'
+        f'<div class="k">{_esc(k)}</div></div>'
+        for n, k in tiles2) + "</div>")
+    s2.append('<div class="line mut" style="margin-top:-6px">Monthly '
+              "recurring is an estimate from plan list prices of "
+              "active plans (Lifetime excluded).</div>")
+    if renewals:
+        tot = sum(a or 0 for _, _, a in renewals)
+        items = " · ".join(
+            f"{_esc(e)} - {dstr(pe)}"
+            + (f" - {money(a)}" if a else "")
+            for e, pe, a in sorted(renewals, key=lambda x: x[1]))
+        s2.append(f'<div class="line">Renewals due: {items} '
+                  f"(total {money(tot)})</div>")
+    if conversions:
+        tot = sum(a or 0 for _, _, a in conversions)
+        items = " · ".join(
+            f"{_esc(e)} - {dstr(pe)}"
+            + (f" - {money(a)}" if a else "")
+            for e, pe, a in sorted(conversions, key=lambda x: x[1]))
+        s2.append(f'<div class="line">Trials converting: {items} '
+                  f"(total {money(tot)})</div>")
+    if recent_cancels:
+        items = " · ".join(
+            f"{_esc(e)} - {w.lower()} {dstr(ts, full=True)}"
+            for e, w, ts in sorted(recent_cancels, key=lambda x: -x[2]))
+        s2.append(f'<div class="line">Recent cancellations '
+                  f"(60 days): {items}</div>")
+    else:
+        s2.append('<div class="line mut">Recent cancellations: none '
+                  "in the last 60 days.</div>")
+    summary2 = "".join(s2)
+
     if not cards:
         cards.append('<div class="card">No subscribers yet.</div>')
+
+    # --- needs-attention strip ---
+    if attention:
+        items_html = "".join(
+            f'<div class="aitem"><span class="why">{_esc(why)}</span>'
+            f' - {_esc(em)}</div>'
+            for _p, em, why in sorted(attention,
+                                      key=lambda x: (x[0], x[1])))
+        attention_html = ('<h2>Needs attention</h2>'
+                          f'<div class="attn">{items_html}</div>')
+    else:
+        attention_html = ('<h2>Needs attention</h2>'
+                          '<div class="attn"><div class="aitem">Nothing '
+                          "needs attention.</div></div>")
+
+    if grants_synced:
+        gs = datetime.fromtimestamp(grants_synced, tz)
+        grantsync = ('<div class="foot" style="margin-top:0">TradingView '
+                     f"grant list synced {gs.strftime('%b')} {gs.day}, "
+                     f"{gs.strftime('%I:%M %p')} Winnipeg.</div>")
+    else:
+        grantsync = ""
+
+    status_opts = "".join(
+        f'<option value="{_esc(s)}">{_esc(_STATUS_LABELS.get(s, s.title()))}</option>'
+        for s in sorted(counts))
+    plan_opts = "".join(
+        f'<option value="{_esc(p)}">{_esc(p)}</option>'
+        for p in sorted(plan_counts))
 
     # --- X subscribers section (separate plan, roster-fed) ---
     def fmt_iso(s):
@@ -1818,7 +2144,9 @@ def dashboard(key: str = ""):
                 since = f"Added {added or '-'}"
             tg_line = f" - Telegram @{_esc(xtg)}" if xtg else ""
             xsection += (
-                '<div class="card"><div class="top">'
+                f'<div class="card" data-scope="x" '
+                f'data-search="{_esc(((handle or "") + " " + (xtg or "")).lower())}">'
+                '<div class="top">'
                 f'<div class="email">{_esc(handle or "")}</div>'
                 f'<span class="badge {bclass}">{_esc(blabel)}</span></div>'
                 f'<div class="sub" style="margin:8px 0 0">'
@@ -1831,16 +2159,32 @@ def dashboard(key: str = ""):
                 f"{mu.strftime('%b')} {mu.day}, "
                 f"{mu.strftime('%I:%M %p')} Winnipeg.</div>")
 
-    updated = datetime.fromtimestamp(now, tz).strftime("%b ") + \
-        str(datetime.fromtimestamp(now, tz).day) + \
-        datetime.fromtimestamp(now, tz).strftime(", %I:%M %p") + " Winnipeg"
-    page = (DASHBOARD_PAGE.replace("__UPDATED__", f"Updated {updated}")
+    upd = datetime.fromtimestamp(now, tz)
+    updated = f"{upd.strftime('%b')} {upd.day}, {upd.strftime('%I:%M %p')}"
+    if LAST_HEAL.get("ts"):
+        hd = datetime.fromtimestamp(LAST_HEAL["ts"], tz)
+        heal_str = (f"{hd.strftime('%b')} {hd.day}, "
+                    f"{hd.strftime('%I:%M %p')} Winnipeg")
+        asof = (f"Data as of: registry refreshed from Stripe {heal_str} "
+                f"(on app start, {LAST_HEAL.get('subs', 0)} subscribers) "
+                f"- page generated {updated} Winnipeg")
+    else:
+        asof = ("Data as of: registry has not refreshed from Stripe "
+                f"since this app start - page generated {updated} "
+                "Winnipeg")
+    page = (DASHBOARD_PAGE.replace("__ASOF__", _esc(asof))
+            .replace("__ATTENTION__", attention_html)
+            .replace("__STATUSOPTS__", status_opts)
+            .replace("__PLANOPTS__", plan_opts)
             .replace("__STRIP__", strip)
+            .replace("__SUMMARY2__", summary2)
             .replace("__CARDS__", "".join(cards))
+            .replace("__GRANTSYNC__", grantsync)
             .replace("__XSECTION__", xsection))
     return HTMLResponse(page, headers={
         "X-Robots-Tag": "noindex, nofollow",
         "Cache-Control": "no-store"})
+
 
 
 @app.post("/stripe/repair-invite")
@@ -2379,6 +2723,38 @@ def _stripe_card_fingerprint(customer_id):
     return None
 
 
+_CARD_CACHE: dict = {}
+
+
+def _stripe_card_display(customer_id):
+    """'Visa •••• 4242' for the customer's first card on file, for
+    the owner dashboard. Best effort like the fingerprint read: the
+    restricted key may not be able to read payment methods, and any
+    failure returns None (the dashboard shows a dash, never a guess).
+    Cached 15 minutes per customer so dashboard loads do not hammer
+    the Stripe API."""
+    if not STRIPE_SECRET_KEY or not customer_id or SBYB_TEST_MODE:
+        return None
+    hit = _CARD_CACHE.get(customer_id)
+    if hit and time.time() - hit[1] < 900:
+        return hit[0]
+    out = None
+    try:
+        pms = _stripe_get(
+            f"payment_methods?customer={customer_id}&type=card&limit=1")
+        for pm in pms.get("data") or []:
+            card = pm.get("card") or {}
+            if card.get("last4"):
+                brand = (card.get("brand") or "Card").title()
+                out = f"{brand} \u2022\u2022\u2022\u2022 {card['last4']}"
+                break
+    except Exception as e:
+        print(f"[dashboard] card read failed for {customer_id}: {e}",
+              flush=True)
+    _CARD_CACHE[customer_id] = (out, time.time())
+    return out
+
+
 def _stripe_stamp_identity(sub_id=None, customer_id=None,
                            trial_ts=None, refund_ts=None, tv=None,
                            card=None):
@@ -2602,6 +2978,9 @@ def stripe_rebuild_from_email(payload: dict, key: str = ""):
     return dict(zip(cols, row))
 
 
+LAST_HEAL = {"ts": None, "subs": 0}
+
+
 def _self_heal_subs():
     """Boot-time self-heal: refresh site_subs from the Stripe
     subscription list so a redeploy (which resets the app database)
@@ -2685,13 +3064,14 @@ def _self_heal_subs():
                              (sub.get("metadata") or {})):
                     merged_meta.update(_src)
                 tv_restore = _norm_tv(merged_meta.get("sbyb_tv"))
+                sub_created = sub.get("created") or now
                 con.execute(
                     """INSERT INTO site_subs(email, plan, status,
                            stripe_customer_id, stripe_subscription_id,
                            checkout_session_id, invite_link,
                            current_period_end, created_ts, updated_ts,
-                           tv_username, welcome_sent_ts)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                           tv_username, welcome_sent_ts, canceled_ts)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(email) DO UPDATE SET
                          plan=excluded.plan,
                          status=CASE WHEN site_subs.status='refunded'
@@ -2703,6 +3083,14 @@ def _self_heal_subs():
                          current_period_end=COALESCE(
                              excluded.current_period_end,
                              site_subs.current_period_end),
+                         created_ts=CASE
+                             WHEN site_subs.created_ts IS NULL
+                               OR excluded.created_ts < site_subs.created_ts
+                             THEN excluded.created_ts
+                             ELSE site_subs.created_ts END,
+                         canceled_ts=COALESCE(
+                             excluded.canceled_ts,
+                             site_subs.canceled_ts),
                          tv_username=COALESCE(
                              site_subs.tv_username,
                              excluded.tv_username),
@@ -2711,8 +3099,9 @@ def _self_heal_subs():
                              excluded.welcome_sent_ts),
                          updated_ts=excluded.updated_ts""",
                     (email, plan, sub.get("status"), customer.get("id"),
-                     sub.get("id"), None, None, period_end, now, now,
-                     tv_restore, meta_welcomed))
+                     sub.get("id"), None, None, period_end, sub_created,
+                     now, tv_restore, meta_welcomed,
+                     sub.get("canceled_at")))
                 healed += 1
             con.commit()
             # Rebuild the one-trial / one-refund identity registry
@@ -2775,6 +3164,8 @@ def _self_heal_subs():
             con.commit()
         finally:
             con.close()
+        LAST_HEAL["ts"] = time.time()
+        LAST_HEAL["subs"] = len(winners)
         print(f"[stripe] self-heal: {len(subs)} subscriptions seen, "
               f"{len(winners)} unique emails, {healed} rows upserted",
               flush=True)
