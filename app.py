@@ -661,9 +661,12 @@ MANIFEST = {
 SW_JS = """// Installable-app service worker. Network for everything except the
 // icons, which are cache-first. Pages, logins and heatmaps are never
 // cached, so membership checks stay live.
-var CACHE = 'sbyb-icons-v3';
+var CACHE = 'sbyb-icons-v4';
 var ICONS = ['/icons/icon-192.png', '/icons/icon-512.png',
-             '/icons/icon-maskable-512.png', '/icons/apple-touch-icon.png'];
+             '/icons/icon-maskable-512.png', '/icons/apple-touch-icon.png',
+             '/icons/sbyb-icon-192.png', '/icons/sbyb-icon-512.png',
+             '/icons/sbyb-icon-maskable-512.png',
+             '/icons/sbyb-apple-touch-icon.png'];
 self.addEventListener('install', function(e) {
   e.waitUntil(caches.open(CACHE).then(function(c) {
     return c.addAll(ICONS);
@@ -696,7 +699,9 @@ def service_worker():
 @app.get("/icons/{name}")
 def icon(name: str):
     safe = {"icon-192.png", "icon-512.png", "icon-maskable-512.png",
-            "apple-touch-icon.png"}
+            "apple-touch-icon.png", "sbyb-icon-192.png",
+            "sbyb-icon-512.png", "sbyb-icon-maskable-512.png",
+            "sbyb-apple-touch-icon.png"}
     if name not in safe:
         return JSONResponse({"error": "not found"}, status_code=404)
     return FileResponse(os.path.join(APP_DIR, "static", "icons", name),
@@ -1619,6 +1624,15 @@ _STATUS_LABELS = {
 DASHBOARD_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#04090a">
+<link rel="manifest" href="/dashboard/manifest.webmanifest?key=__KEY__">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="SBYB Subs">
+<link rel="apple-touch-icon" href="/icons/sbyb-apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192"
+href="/icons/sbyb-icon-192.png">
 <title>Subscribers - SpyBeforeYouBuy</title>
 <style>
 *{box-sizing:border-box}
@@ -1700,7 +1714,14 @@ __XSECTION__
 subscribers. Telegram shows Joined when the roster sync has seen the
 join, otherwise Invite sent from the invite link on file. X, join and
 grant data are snapshots the roster sync pushes every 15 minutes.
-Next-charge amounts are the plan list prices.</div>
+Next-charge amounts are the plan list prices.
+<button id="installbtn" style="display:none;background:#175263;
+color:#dff3fa;border:none;border-radius:8px;padding:10px 18px;
+font-size:14px;font-weight:700;cursor:pointer;margin-top:12px">
+Install the SBYB app</button>
+<div id="installtip" style="margin-top:10px">Tip: put this on your home
+screen like the GEX app - open your browser menu and tap
+'Install app' (or 'Add to Home screen').</div></div>
 </div>
 <script>
 var q=document.getElementById('q'),fs=document.getElementById('fs'),
@@ -1716,7 +1737,59 @@ function filt(){
 }
 [q,fs,fp].forEach(function(e){e.addEventListener('input',filt);});
 </script>
+<script>
+if('serviceWorker' in navigator){window.addEventListener('load',
+function(){navigator.serviceWorker.register('/sw.js')
+.catch(function(){})})}
+var _dip=null;
+window.addEventListener('beforeinstallprompt',function(e){
+ e.preventDefault();_dip=e;
+ document.getElementById('installbtn').style.display='inline-block';
+ document.getElementById('installtip').style.display='none';});
+document.getElementById('installbtn').addEventListener('click',
+function(){if(!_dip)return;_dip.prompt();
+ _dip.userChoice.then(function(){_dip=null;
+ document.getElementById('installbtn').style.display='none';});});
+if(window.matchMedia('(display-mode: standalone)').matches||
+ window.navigator.standalone){
+ document.getElementById('installtip').style.display='none';}
+</script>
 </body></html>"""
+
+
+@app.get("/dashboard/manifest.webmanifest")
+def dashboard_manifest(key: str = ""):
+    """Installable-app manifest for the subscriber dashboard (the
+    'SBYB Subs' home-screen app, sibling of the GEX Heatmap app).
+    Keyed exactly like the page: the start_url carries the read key,
+    so the manifest is never served without it - 404 otherwise.
+    handle_links not-preferred mirrors the GEX app: links to this
+    domain open in the browser, the app opens from its icon."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    man = {
+        "name": "SPY BEFORE YOU BUY - Subscribers",
+        "short_name": "SBYB Subs",
+        "description": ("Owner dashboard - SpyBeforeYouBuy website "
+                        "and X subscribers, trials, renewals and "
+                        "indicator grants at a glance."),
+        "start_url": "/dashboard?key=" + key,
+        "scope": "/dashboard",
+        "handle_links": "not-preferred",
+        "display": "standalone",
+        "background_color": "#04090a",
+        "theme_color": "#04090a",
+        "icons": [
+            {"src": "/icons/sbyb-icon-192.png?v=1", "sizes": "192x192",
+             "type": "image/png", "purpose": "any"},
+            {"src": "/icons/sbyb-icon-512.png?v=1", "sizes": "512x512",
+             "type": "image/png", "purpose": "any"},
+            {"src": "/icons/sbyb-icon-maskable-512.png?v=1",
+             "sizes": "512x512", "type": "image/png",
+             "purpose": "maskable"},
+        ],
+    }
+    return JSONResponse(man, media_type="application/manifest+json")
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -2172,7 +2245,8 @@ def dashboard(key: str = ""):
         asof = ("Data as of: registry has not refreshed from Stripe "
                 f"since this app start - page generated {updated} "
                 "Winnipeg")
-    page = (DASHBOARD_PAGE.replace("__ASOF__", _esc(asof))
+    page = (DASHBOARD_PAGE.replace("__KEY__", key)
+            .replace("__ASOF__", _esc(asof))
             .replace("__ATTENTION__", attention_html)
             .replace("__STATUSOPTS__", status_opts)
             .replace("__PLANOPTS__", plan_opts)
