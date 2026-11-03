@@ -856,6 +856,16 @@ def _subs_db():
         event_id TEXT PRIMARY KEY, type TEXT, ts REAL)""")
     con.execute("""CREATE TABLE IF NOT EXISTS tv_claims(
         email TEXT, tv_username TEXT, matched INTEGER, ts REAL)""")
+    # Telegram join mirror for the owner dashboard (Nov 2 2026). Join
+    # state is owned by the VM roster bot (telegram-subscribers/
+    # roster.db, which persists); site_sync pushes a copy here through
+    # the keyed /stripe/telegram-status endpoint so the dashboard can
+    # show Joined vs Invite sent. A redeploy wipes this table like
+    # everything else - it refills on the next 15-minute sync, and the
+    # dashboard falls back to the invite link on file until it does.
+    con.execute("""CREATE TABLE IF NOT EXISTS telegram_joins(
+        email TEXT PRIMARY KEY, status TEXT, tg_username TEXT,
+        joined_at TEXT, updated_ts REAL)""")
     return con
 
 
@@ -1451,6 +1461,272 @@ def stripe_subs(key: str = ""):
         d["refund_used_ts"] = refund_ts
         subs.append(d)
     return {"subs": subs}
+
+
+@app.post("/stripe/telegram-status")
+def stripe_telegram_status(payload: dict, key: str = ""):
+    """Keyed mirror push from the VM roster sync: Telegram join state
+    per website subscriber (pending = invite sent, active = joined,
+    removed). The roster on the VM is the source of truth; this copy
+    exists only so /dashboard can show join state. Same key guard as
+    /stripe/subs - 404 on mismatch, reveals nothing."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    joins = payload.get("joins") or []
+    if not isinstance(joins, list):
+        return JSONResponse({"detail": "bad payload"}, status_code=400)
+    con = _subs_db()
+    try:
+        n = 0
+        for j in joins:
+            if not isinstance(j, dict):
+                continue
+            email = (j.get("email") or "").strip().lower()[:254]
+            if not email or "@" not in email:
+                continue
+            con.execute(
+                """INSERT INTO telegram_joins(email, status, tg_username,
+                       joined_at, updated_ts) VALUES(?,?,?,?,?)
+                   ON CONFLICT(email) DO UPDATE SET
+                     status=excluded.status,
+                     tg_username=excluded.tg_username,
+                     joined_at=excluded.joined_at,
+                     updated_ts=excluded.updated_ts""",
+                (email, (j.get("status") or "")[:32],
+                 (j.get("tg_username") or "")[:64] or None,
+                 (j.get("joined_at") or "")[:32] or None, time.time()))
+            n += 1
+        con.commit()
+    finally:
+        con.close()
+    return {"stored": n}
+
+
+# ---------- owner dashboard (read-only, keyed) ----------
+# Justin's private view of the subscriber registry (ordered Nov 2
+# 2026): who is subscribed, what plan, what state, how long is left.
+# Read-only by design - cancellations and refunds stay in Stripe /
+# through the hub. Same key guard as /stripe/subs: without the key
+# the page is a plain 404 and no subscriber data ever renders.
+_PLAN_PRICES = {
+    "Monthly": "$20/mo",
+    "Quarterly": "$45/qtr",
+    "Yearly": "$150/yr",
+    "Lifetime": "$500 once",
+    IO_PLAN: "$10/mo",
+}
+_STATUS_LABELS = {
+    "trialing": "Trialing",
+    "active": "Active",
+    "past_due": "Past due",
+    "canceled": "Canceled",
+    "cancelled": "Canceled",
+    "refunded": "Refunded",
+    "unpaid": "Unpaid",
+    "lifetime": "Lifetime",
+}
+
+DASHBOARD_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Subscribers - SpyBeforeYouBuy</title>
+<style>
+*{box-sizing:border-box}
+body{background:#04090a;color:#e8ecef;margin:0;
+font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+padding:20px 14px 48px}
+.wrap{max-width:880px;margin:0 auto}
+.brand{color:#7fb3c8;font-weight:800;letter-spacing:2px;font-size:12px}
+h1{font-size:24px;margin:4px 0 2px}
+.sub{color:#8fa3ad;font-size:13px;margin-bottom:18px}
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));
+gap:10px;margin-bottom:20px}
+.tile{background:#0a151a;border:1px solid #175263;border-radius:12px;
+padding:12px 12px 10px}
+.tile .n{font-size:26px;font-weight:800;line-height:1}
+.tile .k{color:#8fa3ad;font-size:11px;letter-spacing:1px;margin-top:5px;
+text-transform:uppercase}
+.tile.warn{border-color:#8a6d1f}
+.tile.warn .n{color:#f2c94c}
+.card{background:#0a151a;border:1px solid #1d323c;border-radius:12px;
+padding:14px 16px;margin-bottom:12px}
+.card .top{display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+justify-content:space-between}
+.email{font-weight:700;font-size:16px;word-break:break-all}
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;
+font-size:12px;font-weight:700;letter-spacing:.4px;white-space:nowrap}
+.b-trialing{background:#175263;color:#dff3fa}
+.b-active,.b-lifetime{background:#14532d;color:#bbf7d0}
+.b-past_due,.b-unpaid{background:#7c2d12;color:#fed7aa}
+.b-canceled,.b-refunded{background:#3f1d1d;color:#fca5a5}
+.b-other{background:#263238;color:#cfd8dc}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+gap:8px 18px;margin-top:12px}
+.f .k{color:#8fa3ad;font-size:11px;letter-spacing:1px;text-transform:uppercase}
+.f .v{font-size:14px;margin-top:2px;word-break:break-word}
+.chip{display:inline-block;background:#175263;color:#dff3fa;border-radius:6px;
+padding:1px 7px;font-size:12px;margin:1px 2px 1px 0}
+.chip.red{background:#7c2d12;color:#fed7aa}
+.mut{color:#8fa3ad}
+.foot{color:#637a84;font-size:12px;margin-top:20px;line-height:1.6}
+</style></head><body><div class="wrap">
+<div class="brand">SPY BEFORE YOU BUY</div>
+<h1>Subscribers</h1>
+<div class="sub">Private dashboard - read only. __UPDATED__</div>
+__STRIP__
+__CARDS__
+<div class="foot">Actions (cancel, refund) stay in Stripe. Telegram shows
+Joined when the roster sync has seen the join, otherwise Invite sent from
+the invite link on file.</div>
+</div></body></html>"""
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(key: str = ""):
+    """Justin's private subscriber dashboard. 404 unless the shared
+    key configured on Render matches - reveals nothing when
+    unconfigured, and the page itself is noindex."""
+    if not _key_ok(key):
+        return HTMLResponse("Not found", status_code=404)
+    from datetime import datetime
+    from html import escape as _esc
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("America/Winnipeg")
+    now = time.time()
+    today = datetime.fromtimestamp(now, tz).date()
+    con = _subs_db()
+    try:
+        rows = con.execute(
+            """SELECT email, plan, status, invite_link,
+               current_period_end, created_ts, tv_username,
+               welcome_sent_ts, trial_repeat
+               FROM site_subs""").fetchall()
+        flags = {r[0]: (r[1], r[2]) for r in con.execute(
+            "SELECT key, trial_used_ts, refund_used_ts "
+            "FROM identity_flags WHERE kind='email'")}
+        joins = {r[0]: (r[1], r[2]) for r in con.execute(
+            "SELECT email, status, tg_username FROM telegram_joins")}
+    finally:
+        con.close()
+
+    def fmt_date(ts):
+        if not ts:
+            return None, None
+        d = datetime.fromtimestamp(ts, tz)
+        return d, f"{d.strftime('%b')} {d.day}"
+
+    def ends_text(status, ts):
+        d, label = fmt_date(ts)
+        if status == "lifetime" or (not ts and status == "lifetime"):
+            return "Lifetime - no end date"
+        if not ts:
+            return "-"
+        days = (d.date() - today).days
+        when = "Trial ends" if status == "trialing" else "Period ends"
+        if days < 0:
+            return f"{when} {label} - ended"
+        if days == 0:
+            return f"{when} {label} - today"
+        if days == 1:
+            return f"{when} {label} - 1 day left"
+        return f"{when} {label} - {days} days left"
+
+    counts = {}
+    trials_soon = 0
+    paid_active = 0
+    for r in rows:
+        st = (r[2] or "unknown").lower()
+        counts[st] = counts.get(st, 0) + 1
+        if st in ("active", "lifetime"):
+            paid_active += 1
+        if st == "trialing" and r[4]:
+            dd = (datetime.fromtimestamp(r[4], tz).date() - today).days
+            if 0 <= dd <= 3:
+                trials_soon += 1
+    tiles = [
+        (str(len(rows)), "Subscribers"),
+        (str(paid_active), "Active paid"),
+        (str(counts.get("trialing", 0)), "Trialing"),
+        (str(trials_soon), "Trials ending in 3 days"),
+        (str(counts.get("past_due", 0)), "Past due"),
+        (str(counts.get("canceled", 0) + counts.get("refunded", 0)),
+         "Canceled / refunded"),
+    ]
+    strip = '<div class="strip">' + "".join(
+        f'<div class="tile{" warn" if k.startswith("Trials ending") and n != "0" else ""}">'
+        f'<div class="n">{_esc(n)}</div><div class="k">{_esc(k)}</div></div>'
+        for n, k in tiles) + "</div>"
+
+    def sort_key(r):
+        return (r[4] is None, r[4] or 0, (r[0] or ""))
+
+    cards = []
+    for r in sorted(rows, key=sort_key):
+        (email, plan, status, invite, period_end, _created, tv,
+         welcomed, trial_repeat) = r
+        st = (status or "unknown").lower()
+        label = _STATUS_LABELS.get(st, (status or "Unknown").title())
+        price = _PLAN_PRICES.get(plan or "")
+        plan_text = f"{plan or '-'} - {price}" if price else (plan or "-")
+        trial_ts, refund_ts = flags.get(email, (None, None))
+        if plan == IO_PLAN:
+            tg_text = '<span class="mut">No Telegram (indicators only)</span>'
+        elif email in joins:
+            jstatus, juser = joins[email]
+            if jstatus == "active":
+                tg_text = "Joined" + (f" - @{_esc(juser)}" if juser else "")
+            elif jstatus == "removed":
+                tg_text = "Removed"
+            else:
+                tg_text = "Invite sent"
+        elif invite:
+            tg_text = "Invite sent"
+        else:
+            tg_text = '<span class="mut">No invite yet</span>'
+        if welcomed:
+            wd, wlabel = fmt_date(welcomed)
+            welcome_text = f"Sent - {wlabel}"
+        else:
+            welcome_text = '<span class="mut">Not sent</span>'
+        chips = []
+        if trial_ts:
+            chips.append('<span class="chip">Trial used</span>')
+        if refund_ts:
+            chips.append('<span class="chip red">Refund used</span>')
+        if trial_repeat:
+            chips.append('<span class="chip red">Repeat trial</span>')
+        flags_text = "".join(chips) if chips else '<span class="mut">-</span>'
+        tv_text = _esc(tv) if tv else \
+            '<span class="mut">Not entered</span>'
+        cards.append(
+            '<div class="card"><div class="top">'
+            f'<div class="email">{_esc(email or "")}</div>'
+            f'<span class="badge b-{_esc(st)}">{_esc(label)}</span></div>'
+            '<div class="grid">'
+            f'<div class="f"><div class="k">Plan</div>'
+            f'<div class="v">{_esc(plan_text)}</div></div>'
+            f'<div class="f"><div class="k">Ends</div>'
+            f'<div class="v">{_esc(ends_text(st, period_end))}</div></div>'
+            f'<div class="f"><div class="k">TradingView</div>'
+            f'<div class="v">{tv_text}</div></div>'
+            f'<div class="f"><div class="k">Telegram</div>'
+            f'<div class="v">{tg_text}</div></div>'
+            f'<div class="f"><div class="k">Welcome email</div>'
+            f'<div class="v">{welcome_text}</div></div>'
+            f'<div class="f"><div class="k">Flags</div>'
+            f'<div class="v">{flags_text}</div></div>'
+            "</div></div>")
+    if not cards:
+        cards.append('<div class="card">No subscribers yet.</div>')
+    updated = datetime.fromtimestamp(now, tz).strftime("%b ") + \
+        str(datetime.fromtimestamp(now, tz).day) + \
+        datetime.fromtimestamp(now, tz).strftime(", %I:%M %p") + " Winnipeg"
+    page = (DASHBOARD_PAGE.replace("__UPDATED__", f"Updated {updated}")
+            .replace("__STRIP__", strip)
+            .replace("__CARDS__", "".join(cards)))
+    return HTMLResponse(page, headers={
+        "X-Robots-Tag": "noindex, nofollow",
+        "Cache-Control": "no-store"})
 
 
 @app.post("/stripe/repair-invite")
@@ -2283,6 +2559,18 @@ def _self_heal_subs():
                         meta_welcomed = float(raw_meta)
                     except (TypeError, ValueError):
                         meta_welcomed = None
+                # The TradingView username is stamped on Stripe
+                # (sbyb_tv, subscription + customer metadata) whenever
+                # it becomes known, so a wipe can restore it too - a
+                # fresh row used to come back with tv_username NULL
+                # even when the stamp existed (found Nov 2 2026 when
+                # the dashboard build read the live registry). The
+                # stamp holds the normalized (lowercase) username.
+                merged_meta = {}
+                for _src in ((customer.get("metadata") or {}),
+                             (sub.get("metadata") or {})):
+                    merged_meta.update(_src)
+                tv_restore = _norm_tv(merged_meta.get("sbyb_tv"))
                 con.execute(
                     """INSERT INTO site_subs(email, plan, status,
                            stripe_customer_id, stripe_subscription_id,
@@ -2301,13 +2589,16 @@ def _self_heal_subs():
                          current_period_end=COALESCE(
                              excluded.current_period_end,
                              site_subs.current_period_end),
+                         tv_username=COALESCE(
+                             site_subs.tv_username,
+                             excluded.tv_username),
                          welcome_sent_ts=COALESCE(
                              site_subs.welcome_sent_ts,
                              excluded.welcome_sent_ts),
                          updated_ts=excluded.updated_ts""",
                     (email, plan, sub.get("status"), customer.get("id"),
                      sub.get("id"), None, None, period_end, now, now,
-                     None, meta_welcomed))
+                     tv_restore, meta_welcomed))
                 healed += 1
             con.commit()
             # Rebuild the one-trial / one-refund identity registry
