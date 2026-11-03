@@ -643,17 +643,18 @@ MANIFEST = {
     "background_color": "#000000",
     "theme_color": "#000000",
     "icons": [
-        # The ?v=2 on the srcs is deliberate: it makes the manifest
-        # differ in a field Chrome's WebAPK updater definitely tracks
-        # (icons), so already-installed apps get re-minted on Chrome's
-        # next update check and pick up handle_links above. Without a
-        # tracked change, an installed copy can keep the old link
-        # rules indefinitely short of a reinstall.
-        {"src": "/icons/icon-192.png?v=2", "sizes": "192x192",
+        # Plain icon paths, deliberately: the ?v=2 versioned srcs
+        # shipped Nov 2 were re-minted into Justin's installed app
+        # the same evening and that package would no longer open.
+        # Reverted the same night - never version the icon srcs
+        # again. (The src change itself is a tracked manifest diff,
+        # so this revert also re-mints installed apps back onto the
+        # working manifest, handle_links included.)
+        {"src": "/icons/icon-192.png", "sizes": "192x192",
          "type": "image/png", "purpose": "any"},
-        {"src": "/icons/icon-512.png?v=2", "sizes": "512x512",
+        {"src": "/icons/icon-512.png", "sizes": "512x512",
          "type": "image/png", "purpose": "any"},
-        {"src": "/icons/icon-maskable-512.png?v=2", "sizes": "512x512",
+        {"src": "/icons/icon-maskable-512.png", "sizes": "512x512",
          "type": "image/png", "purpose": "maskable"},
     ],
 }
