@@ -2488,6 +2488,59 @@ def email_mark_welcomed(payload: dict, key: str = ""):
             "stripe_marked": marked}
 
 
+@app.post("/stripe/cancel-sub")
+def stripe_cancel_sub(payload: dict, key: str = ""):
+    """Keyed: cancel a subscriber's Stripe subscription at period
+    end (cancel_at_period_end) - the act happens now, no further
+    charge is ever taken, and access runs to the end of the current
+    period (for a trialing subscription, the trial end - it never
+    converts). Backs the support reply Justin approved Nov 4 2026:
+    cancellations get that reply sent AND the cancellation carried
+    out. Same key guard as /stripe/subs."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    email = (payload.get("email") or "").strip().lower()
+    if not email:
+        return JSONResponse({"detail": "email required"}, status_code=400)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    con = _subs_db()
+    try:
+        row = con.execute(
+            "SELECT stripe_subscription_id FROM site_subs "
+            "WHERE email=?", (email,)).fetchone()
+    finally:
+        con.close()
+    if not row or not row[0]:
+        return JSONResponse({"detail": "no subscription on file"},
+                            status_code=404)
+    sub_id = row[0]
+    try:
+        data = urllib.parse.urlencode(
+            {"cancel_at_period_end": "true"}).encode()
+        req = urllib.request.Request(
+            f"https://api.stripe.com/v1/subscriptions/{sub_id}",
+            data=data, method="POST")
+        req.add_header("Authorization", f"Bearer {STRIPE_SECRET_KEY}")
+        sub = json.loads(urllib.request.urlopen(req, timeout=20).read())
+    except Exception as e:
+        print(f"[stripe] cancel failed for {email} ({sub_id}): {e}",
+              flush=True)
+        return JSONResponse({"detail": "stripe cancel failed"},
+                            status_code=502)
+    items = (sub.get("items") or {}).get("data") or []
+    period_end = sub.get("current_period_end") or (
+        items[0].get("current_period_end") if items else None)
+    print(f"[stripe] cancel at period end set: {email} sub={sub_id} "
+          f"status={sub.get('status')} period_end={period_end}",
+          flush=True)
+    return {"email": email, "subscription": sub_id,
+            "status": sub.get("status"),
+            "cancel_at_period_end": sub.get("cancel_at_period_end"),
+            "current_period_end": period_end}
+
+
 @app.post("/email/test-welcome")
 def email_test_welcome(payload: dict, key: str = ""):
     """Keyed: one-off [TEST] welcome for one subscriber on file -
