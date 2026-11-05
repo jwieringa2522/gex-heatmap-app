@@ -2516,12 +2516,21 @@ def stripe_cancel_sub(payload: dict, key: str = ""):
         return JSONResponse({"detail": "no subscription on file"},
                             status_code=404)
     sub_id = row[0]
+    immediate = bool(payload.get("immediate"))
     try:
-        data = urllib.parse.urlencode(
-            {"cancel_at_period_end": "true"}).encode()
-        req = urllib.request.Request(
-            f"https://api.stripe.com/v1/subscriptions/{sub_id}",
-            data=data, method="POST")
+        if immediate:
+            # DELETE cancels right now - used for test-account
+            # teardowns where the record must stop existing today,
+            # not at period end.
+            req = urllib.request.Request(
+                f"https://api.stripe.com/v1/subscriptions/{sub_id}",
+                method="DELETE")
+        else:
+            data = urllib.parse.urlencode(
+                {"cancel_at_period_end": "true"}).encode()
+            req = urllib.request.Request(
+                f"https://api.stripe.com/v1/subscriptions/{sub_id}",
+                data=data, method="POST")
         req.add_header("Authorization", f"Bearer {STRIPE_SECRET_KEY}")
         sub = json.loads(urllib.request.urlopen(req, timeout=20).read())
     except Exception as e:
@@ -2532,13 +2541,14 @@ def stripe_cancel_sub(payload: dict, key: str = ""):
     items = (sub.get("items") or {}).get("data") or []
     period_end = sub.get("current_period_end") or (
         items[0].get("current_period_end") if items else None)
-    print(f"[stripe] cancel at period end set: {email} sub={sub_id} "
-          f"status={sub.get('status')} period_end={period_end}",
-          flush=True)
+    print(f"[stripe] cancel {'IMMEDIATE' if immediate else 'at period end'}"
+          f": {email} sub={sub_id} status={sub.get('status')} "
+          f"period_end={period_end}", flush=True)
     return {"email": email, "subscription": sub_id,
             "status": sub.get("status"),
             "cancel_at_period_end": sub.get("cancel_at_period_end"),
-            "current_period_end": period_end}
+            "current_period_end": period_end,
+            "ended_at": sub.get("ended_at")}
 
 
 @app.post("/email/test-welcome")
