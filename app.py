@@ -376,6 +376,12 @@ APP_PAGE = """<!DOCTYPE html>
   <div class="who">Logged in as <b>__NAME__</b> &middot; <a href="/api/logout">log out</a></div>
   <div id="installTip" style="display:none;background:#0b0e13;border:1px solid #30857a;border-radius:10px;padding:10px 14px;margin:0 auto 16px;max-width:520px;font-size:13px;color:#bbb;text-align:left;">
     Get the app version - <b style="color:#fff">add this page to your home screen</b> and it opens full-screen with its own icon, no app store needed. <span id="installHow"></span>
+    <div id="iosSteps" style="display:none;margin-top:8px;line-height:1.55;">
+      Opened this from Telegram? Tap the compass button below - <b style="color:#fff">Open in Safari</b> - first. Add to Home Screen only appears in Safari.<br>
+      1. Tap the <b style="color:#fff">Share</b> icon at the bottom of Safari.<br>
+      2. Tap <b style="color:#fff">Add to Home Screen</b>.<br>
+      3. Tap <b style="color:#fff">Add</b> - done, it opens like an app.
+    </div>
     <button id="installBtn" type="button" style="display:none;background:#30857a;color:#fff;border:0;border-radius:8px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer;margin-top:8px;">Install app</button>
     <a href="#" id="installX" style="color:#30857a;text-decoration:none;float:right;">dismiss</a>
   </div>
@@ -385,7 +391,11 @@ APP_PAGE = """<!DOCTYPE html>
       if (standalone || localStorage.getItem('sbybInstallDismissed')) return;
       var ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
       var how = document.getElementById('installHow');
-      how.textContent = ios ? 'On iPhone: tap Share, then Add to Home Screen.' : 'On Android: tap the browser menu, then Install app or Add to Home screen.';
+      if (ios) {
+        document.getElementById('iosSteps').style.display = 'block';
+      } else {
+        how.textContent = 'On Android: tap the browser menu, then Install app or Add to Home screen.';
+      }
       var tip = document.getElementById('installTip');
       var btn = document.getElementById('installBtn');
       tip.style.display = 'block';
