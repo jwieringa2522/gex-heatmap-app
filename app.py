@@ -856,6 +856,28 @@ def _subs_db():
         con.execute("ALTER TABLE site_subs ADD COLUMN trial_repeat INTEGER")
     if "canceled_ts" not in cols:
         con.execute("ALTER TABLE site_subs ADD COLUMN canceled_ts REAL")
+    # Referral program "give a month, get a month" (Nov 7 2026).
+    # referred_by / ref_state / first_charge_ts live on the friend's
+    # row; ref_bank / ref_earned on the referrer's row. The durable
+    # copies are Stripe metadata stamps (sbyb_ref_*), restored by
+    # the boot self-heal exactly like the identity registry, so a
+    # database wipe cannot erase referral state.
+    if "referred_by" not in cols:
+        con.execute("ALTER TABLE site_subs ADD COLUMN referred_by TEXT")
+    if "ref_state" not in cols:
+        con.execute("ALTER TABLE site_subs ADD COLUMN ref_state TEXT")
+    if "first_charge_ts" not in cols:
+        con.execute(
+            "ALTER TABLE site_subs ADD COLUMN first_charge_ts REAL")
+    if "ref_bank" not in cols:
+        con.execute("ALTER TABLE site_subs ADD COLUMN ref_bank INTEGER")
+    if "ref_earned" not in cols:
+        con.execute(
+            "ALTER TABLE site_subs ADD COLUMN ref_earned INTEGER")
+    con.execute("""CREATE TABLE IF NOT EXISTS referrals(
+        friend_email TEXT PRIMARY KEY, referrer_email TEXT,
+        state TEXT, created_ts REAL, charge_ts REAL, earned_ts REAL,
+        note TEXT)""")
     # One-trial / one-refund identity registry (Nov 2 2026). Local
     # mirror only - the durable stamps live on Stripe (subscription +
     # customer metadata) and this table is rebuilt from them at boot
@@ -1075,6 +1097,11 @@ def _on_checkout_completed(con, obj):
             con.execute(
                 """UPDATE site_subs SET stripe_subscription_id=NULL
                    WHERE email=?""", (email,))
+    # Referral attribution (Nov 7 2026): runs BEFORE the trial
+    # enforcement below stamps this subscription, so the identity
+    # registry still shows any PRIOR trial under a different
+    # subscription - that is what blocks repeat gaming.
+    _attribute_referral(con, obj, email)
     if status == "trialing" and obj.get("subscription"):
         # One free trial per person, ever (locked policy, Nov 2
         # 2026): stamp this identity as trial-used, or end the
@@ -1263,6 +1290,8 @@ async def stripe_webhook(request: Request):
             _on_subscription_deleted(con, obj)
         elif etype == "invoice.payment_failed":
             _on_payment_failed(con, obj)
+        elif etype == "invoice.paid":
+            _on_invoice_paid(con, obj)
         elif etype == "charge.refunded":
             _on_charge_reversed(con, obj, refund=True)
         elif etype == "charge.dispute.created":
@@ -1376,6 +1405,7 @@ def access_page(session_id: str = ""):
             "ENTER MY TRADINGVIEW USERNAME</a>"
             f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>'
             f'<div class="small">Plan: {row[1]} - {row[0]}</div>'
+            f"{_referral_block(row[0])}"
             f"{_GUIDE_LINE}")
     elif row:
         tv_note = (
@@ -1396,7 +1426,8 @@ def access_page(session_id: str = ""):
                   f"Manage or upgrade my subscription</a></div>"
                   if STRIPE_PORTAL_URL else "")
         body = ('<div class="big">You are in.</div>'
-                f"{personal}{_access_steps(tv_note)}{portal}")
+                f"{personal}{_access_steps(tv_note)}{portal}"
+                f"{_referral_block(row[0])}")
     else:
         body = ('<div class="big">Almost there.</div>'
                 f"{_access_steps()}")
@@ -1417,6 +1448,181 @@ style="padding:12px 16px;border-radius:8px;border:1px solid #3a4542;background:#
 </form>
 <div class="small">No TradingView account yet? A free one is all you need -
 sign up at tradingview.com, then come back with your username.</div>"""
+
+
+@app.get("/ref/{code}")
+def ref_redirect(code: str):
+    """A member's personal referral link: resolve the code to a
+    paying member and bounce to the referral Monthly Payment
+    Link with the code riding as client_reference_id, which the
+    checkout webhook reads back for attribution."""
+    code = (code or "").strip().upper()
+    referrer = None
+    con = _subs_db()
+    try:
+        for (em, st) in con.execute(
+                "SELECT email, status FROM site_subs").fetchall():
+            if _ref_code(em) == code and st in REF_GOOD:
+                referrer = em
+                break
+    finally:
+        con.close()
+    link = _referral_link_url() if referrer else None
+    if referrer and link:
+        sep = "&" if "?" in link else "?"
+        return RedirectResponse(
+            f"{link}{sep}client_reference_id={code}", status_code=302)
+    body = ('<div class="big">That referral link does not look '
+            "right.</div><p>Check the link your friend sent you, "
+            "or head to the site and pick Monthly from there - "
+            "and if you were sent a referral link, ask them to "
+            "send it again so the discount applies.</p>"
+            f'<div class="small">Questions? Email {SUPPORT_EMAIL}'
+            "</div>")
+    return HTMLResponse(ACCESS_PAGE.replace("__BODY__", body))
+
+
+_REF_FORM = """<p>Members: enter the email you subscribed with to get
+your personal referral link.</p>
+<form method="post" action="/referral">
+<p><input name="email" type="email" required placeholder="Email you subscribed with"
+style="padding:12px 16px;border-radius:8px;border:1px solid #3a4542;background:#111;color:#fff;width:320px;max-width:84vw"></p>
+<p><button class="btn" type="submit" style="border:0;cursor:pointer">GET MY REFERRAL LINK</button></p>
+</form>
+<p class="small">Give a month, get a month: a friend who joins
+Monthly through your link gets their first month for $10 instead
+of $20. Once their first payment has cleared the 3-day refund
+window, a free month is added to your account and comes off your
+next renewal automatically. You can bank up to 12 free months.</p>"""
+
+
+@app.get("/referral", response_class=HTMLResponse)
+def referral_page():
+    return ACCESS_PAGE.replace("__BODY__", _REF_FORM)
+
+
+@app.post("/referral", response_class=HTMLResponse)
+async def referral_submit(request: Request):
+    from urllib.parse import parse_qs
+    form = parse_qs((await request.body()).decode("utf-8", "replace"))
+    email = (form.get("email", [""])[0] or "").strip().lower()[:254]
+    info = _referral_info(email) if email else None
+    if not info:
+        body = ('<div class="big">No active membership found.</div>'
+                "<p>That email does not match a paying membership. "
+                "Referral links are for members - if you just "
+                "signed up, give it a minute and try again, and "
+                "make sure the email is the one you subscribed "
+                "with.</p>" + _REF_FORM)
+        return ACCESS_PAGE.replace("__BODY__", body)
+    fr = info["friends"]
+    joined = fr.get("pending", 0) + fr.get("earned", 0)
+    body = (
+        '<div class="big">Your referral link</div>'
+        f'<p><b>{info["link"]}</b></p>'
+        "<p>Share it anywhere. A friend who joins Monthly "
+        "through it gets their first month for $10 instead of "
+        "$20, and once their first payment clears the 3-day "
+        "refund window, you bank a free month - it comes off "
+        "your next renewal automatically.</p>"
+        f'<div class="small">Free months banked: {info["bank"]} '
+        f'of 12 - free months earned so far: {info["earned"]} - '
+        f"friends joined through your link: {joined}</div>"
+        f'<div class="small">Questions? Email {SUPPORT_EMAIL}'
+        "</div>")
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+@app.post("/referrals/run")
+def referrals_run(key: str = ""):
+    """Keyed: run the referral earning pass now (the cron calls
+    this every 2 hours; a pass with nothing pending is a no-op)."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    return _referral_run()
+
+
+@app.post("/stripe/referral-setup")
+def stripe_referral_setup(key: str = ""):
+    """Keyed, idempotent: make sure the referral coupon ($10 off
+    once) and the referral Monthly Payment Link exist in Stripe,
+    copying the live Monthly link's trial and TradingView field.
+    Run once at program setup; safe to re-run."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    out = {}
+    try:
+        coupons = _stripe_get("coupons?limit=100").get("data") or []
+        coupon = next(
+            (c for c in coupons
+             if (c.get("metadata") or {}).get("sbyb") == "referral10"
+             and c.get("valid")), None)
+        if not coupon:
+            coupon = _stripe_post("coupons", {
+                "amount_off": "1000", "currency": "usd",
+                "duration": "once",
+                "name": "Referral - first month $10 off",
+                "metadata[sbyb]": "referral10"})
+        out["coupon_id"] = coupon.get("id")
+        links = _stripe_get("payment_links?limit=100").get("data") or []
+        link = next(
+            (l for l in links
+             if (l.get("metadata") or {}).get("sbyb")
+             == "referral_monthly" and l.get("active")), None)
+        if not link:
+            src = next(
+                (l for l in links
+                 if (l.get("url") or "").endswith(
+                     "00wdR86YK3Qn9nWaxBcs800")), None)
+            if not src:
+                return JSONResponse(
+                    {"detail": "monthly source link not found",
+                     **out}, status_code=502)
+            items = _stripe_get(
+                f"payment_links/{src['id']}/line_items?limit=10"
+            ).get("data") or []
+            price_id = (items[0].get("price") or {}).get("id") \
+                if items else None
+            if not price_id:
+                return JSONResponse(
+                    {"detail": "monthly price not found", **out},
+                    status_code=502)
+            src_full = _stripe_get(f"payment_links/{src['id']}")
+            fields = {
+                "line_items[0][price]": price_id,
+                "line_items[0][quantity]": "1",
+                "discounts[0][coupon]": coupon.get("id"),
+                "metadata[sbyb]": "referral_monthly",
+                "allow_promotion_codes": "false"}
+            sd = src_full.get("subscription_data") or {}
+            if sd.get("trial_period_days"):
+                fields["subscription_data[trial_period_days]"] = \
+                    str(sd["trial_period_days"])
+            for i, cf in enumerate(
+                    src_full.get("custom_fields") or []):
+                fields[f"custom_fields[{i}][key]"] = cf.get("key")
+                label = cf.get("label") or {}
+                fields[f"custom_fields[{i}][label][type]"] = "custom"
+                fields[f"custom_fields[{i}][label][custom]"] = \
+                    label.get("custom") or ""
+                fields[f"custom_fields[{i}][type]"] = \
+                    cf.get("type") or "text"
+                if cf.get("optional"):
+                    fields[f"custom_fields[{i}][optional]"] = "true"
+            link = _stripe_post("payment_links", fields)
+        out["link_id"] = link.get("id")
+        out["link_url"] = link.get("url")
+        if link.get("url"):
+            _REF_LINK_CACHE.update(
+                {"url": link["url"], "ts": time.time()})
+        return out
+    except Exception as e:
+        return JSONResponse(
+            {"detail": f"stripe setup failed: {e}", **out},
+            status_code=502)
 
 
 @app.get("/tradingview", response_class=HTMLResponse)
@@ -1474,7 +1680,8 @@ def stripe_subs(key: str = ""):
             """SELECT email, plan, status, stripe_customer_id,
                stripe_subscription_id, checkout_session_id, invite_link,
                current_period_end, created_ts, updated_ts, tv_username,
-               welcome_sent_ts, trial_repeat
+               welcome_sent_ts, trial_repeat, referred_by, ref_state,
+               first_charge_ts, ref_bank, ref_earned
                FROM site_subs""").fetchall()
         flags = {r[0]: (r[1], r[2]) for r in con.execute(
             "SELECT key, trial_used_ts, refund_used_ts "
@@ -1484,11 +1691,15 @@ def stripe_subs(key: str = ""):
     cols = ("email", "plan", "status", "stripe_customer_id",
             "stripe_subscription_id", "checkout_session_id", "invite_link",
             "current_period_end", "created_ts", "updated_ts", "tv_username",
-            "welcome_sent_ts", "trial_repeat")
+            "welcome_sent_ts", "trial_repeat", "referred_by", "ref_state",
+            "first_charge_ts", "ref_bank", "ref_earned")
     subs = []
     for r in rows:
         d = dict(zip(cols, r))
         d["trial_repeat"] = 1 if d.get("trial_repeat") else 0
+        d["ref_code"] = _ref_code(d["email"])
+        d["ref_bank"] = d.get("ref_bank") or 0
+        d["ref_earned"] = d.get("ref_earned") or 0
         trial_ts, refund_ts = flags.get(d["email"], (None, None))
         d["trial_used_ts"] = trial_ts
         d["refund_used_ts"] = refund_ts
@@ -3207,13 +3418,37 @@ def _self_heal_subs():
                     merged_meta.update(_src)
                 tv_restore = _norm_tv(merged_meta.get("sbyb_tv"))
                 sub_created = sub.get("created") or now
+                # Referral state rides the same metadata rails:
+                # by/state/charge on the friend's subscription,
+                # bank/earned counts on the referrer's CUSTOMER.
+                ref_by = merged_meta.get("sbyb_ref_by") or None
+                ref_state_v = merged_meta.get("sbyb_ref_state") or None
+                ref_charge = None
+                if merged_meta.get("sbyb_ref_charge_ts"):
+                    try:
+                        ref_charge = float(
+                            merged_meta["sbyb_ref_charge_ts"])
+                    except (TypeError, ValueError):
+                        ref_charge = None
+                cust_meta = customer.get("metadata") or {}
+
+                def _meta_int(k):
+                    try:
+                        return int(float(cust_meta.get(k)))
+                    except (TypeError, ValueError):
+                        return None
+
+                ref_bank_v = _meta_int("sbyb_ref_bank")
+                ref_earned_v = _meta_int("sbyb_ref_earned")
                 con.execute(
                     """INSERT INTO site_subs(email, plan, status,
                            stripe_customer_id, stripe_subscription_id,
                            checkout_session_id, invite_link,
                            current_period_end, created_ts, updated_ts,
-                           tv_username, welcome_sent_ts, canceled_ts)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                           tv_username, welcome_sent_ts, canceled_ts,
+                           referred_by, ref_state, first_charge_ts,
+                           ref_bank, ref_earned)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(email) DO UPDATE SET
                          plan=excluded.plan,
                          status=CASE WHEN site_subs.status='refunded'
@@ -3239,11 +3474,27 @@ def _self_heal_subs():
                          welcome_sent_ts=COALESCE(
                              site_subs.welcome_sent_ts,
                              excluded.welcome_sent_ts),
+                         referred_by=COALESCE(
+                             site_subs.referred_by,
+                             excluded.referred_by),
+                         ref_state=COALESCE(
+                             site_subs.ref_state,
+                             excluded.ref_state),
+                         first_charge_ts=COALESCE(
+                             site_subs.first_charge_ts,
+                             excluded.first_charge_ts),
+                         ref_bank=COALESCE(
+                             site_subs.ref_bank,
+                             excluded.ref_bank),
+                         ref_earned=COALESCE(
+                             site_subs.ref_earned,
+                             excluded.ref_earned),
                          updated_ts=excluded.updated_ts""",
                     (email, plan, sub.get("status"), customer.get("id"),
                      sub.get("id"), None, None, period_end, sub_created,
                      now, tv_restore, meta_welcomed,
-                     sub.get("canceled_at")))
+                     sub.get("canceled_at"), ref_by, ref_state_v,
+                     ref_charge, ref_bank_v, ref_earned_v))
                 healed += 1
             con.commit()
             # Rebuild the one-trial / one-refund identity registry
@@ -3288,6 +3539,18 @@ def _self_heal_subs():
                         "WHERE stripe_subscription_id=?",
                         (sub.get("id"),))
             con.commit()
+            # Rebuild the referrals table from the restored rows:
+            # every friend row carries its referrer and state, so
+            # the working table is fully reconstructible after a
+            # wipe (credit counts ride the customer stamps above).
+            con.execute(
+                """INSERT OR IGNORE INTO referrals(friend_email,
+                       referrer_email, state, created_ts, charge_ts)
+                   SELECT email, referred_by,
+                       COALESCE(ref_state, 'pending'), created_ts,
+                       first_charge_ts FROM site_subs
+                   WHERE referred_by IS NOT NULL""")
+            con.commit()
             # Backfill: a row already sitting at 'refunded' whose
             # identity has no refund stamp yet (the refund landed
             # before the stamp existed, or its webhook was missed)
@@ -3313,6 +3576,420 @@ def _self_heal_subs():
               flush=True)
     except Exception as e:
         print(f"[stripe] self-heal failed: {e}", flush=True)
+
+
+# ---------- referral program: give a month, get a month ----------
+# Locked rules (Justin's order, Nov 7 2026): every paying member
+# has a personal link /ref/<code>. A friend joining Monthly
+# through it gets their first month for $10 instead of $20 (a
+# $10-off-once coupon baked into a dedicated referral Payment
+# Link; attribution rides the checkout session's
+# client_reference_id, which Payment Links pass through). When
+# the friend's first charge has stuck - paid, past the 3-day
+# refund window, not refunded, not cancelled - the referrer
+# banks one free month, posted to their Stripe customer balance
+# so it comes off their next charge automatically. Cap: 12
+# banked months per member. Plan edge defaults: the credit is
+# worth one month of the REFERRER's own plan (Yearly $12.50,
+# Quarterly $15, Indicators Only $10, Lifetime $20 posted to
+# balance against any future charge). Anti-abuse rides the
+# identity registry: self-referrals, returning identities (a
+# prior trial under a different subscription), a shared card
+# fingerprint or a shared TradingView username are all blocked.
+REF_WINDOW_SECS = 3 * 24 * 3600
+REF_CAP = 12
+REF_CREDIT_CENTS = {"Monthly": 2000, "Quarterly": 1500,
+                    "Yearly": 1250, "Indicators Only": 1000,
+                    "Lifetime": 2000}
+REF_GOOD = ("active", "trialing", "past_due", "lifetime")
+_REF_LINK_CACHE = {"url": None, "ts": 0}
+
+
+def _ref_code(email):
+    """A member's referral code, derived from their email -
+    deterministic, so it needs no storage and survives every
+    database wipe by construction."""
+    digest = hashlib.sha256(
+        ("sbyb-ref:" + (email or "").strip().lower()).encode()
+    ).hexdigest()
+    return digest[:8].upper()
+
+
+def _stripe_stamp_referral(sub_id=None, customer_id=None, by=None,
+                           state=None, charge_ts=None, bank=None,
+                           earned=None):
+    """Persist referral markers on Stripe (same pattern as the
+    identity stamps): the durable copy that the boot self-heal
+    restores from. Best effort, never raises."""
+    fields = {}
+    if by:
+        fields["metadata[sbyb_ref_by]"] = by
+    if state:
+        fields["metadata[sbyb_ref_state]"] = state
+    if charge_ts:
+        fields["metadata[sbyb_ref_charge_ts]"] = str(int(charge_ts))
+    if bank is not None:
+        fields["metadata[sbyb_ref_bank]"] = str(int(bank))
+    if earned is not None:
+        fields["metadata[sbyb_ref_earned]"] = str(int(earned))
+    if not fields or not STRIPE_SECRET_KEY or SBYB_TEST_MODE:
+        return
+    if sub_id:
+        try:
+            _stripe_post(f"subscriptions/{sub_id}", fields)
+        except Exception as e:
+            print(f"[referral] sub stamp failed for {sub_id}: {e}",
+                  flush=True)
+    if customer_id:
+        try:
+            _stripe_post(f"customers/{customer_id}", fields)
+        except Exception as e:
+            print(f"[referral] customer stamp failed for "
+                  f"{customer_id}: {e}", flush=True)
+
+
+def _referral_link_url():
+    """The referral Monthly Payment Link (carries the $10-off-once
+    coupon), found by its sbyb=referral_monthly metadata - created
+    once through the keyed /stripe/referral-setup endpoint. Env
+    override wins; the Stripe lookup is cached for an hour."""
+    env_url = os.environ.get("REFERRAL_PAYMENT_LINK_URL", "")
+    if env_url:
+        return env_url
+    if _REF_LINK_CACHE["url"] and \
+            time.time() - _REF_LINK_CACHE["ts"] < 3600:
+        return _REF_LINK_CACHE["url"]
+    if not STRIPE_SECRET_KEY or SBYB_TEST_MODE:
+        return None
+    try:
+        links = _stripe_get("payment_links?limit=100").get("data") or []
+        for link in links:
+            if (link.get("metadata") or {}).get("sbyb") == \
+                    "referral_monthly" and link.get("active"):
+                _REF_LINK_CACHE.update(
+                    {"url": link.get("url"), "ts": time.time()})
+                return link.get("url")
+    except Exception as e:
+        print(f"[referral] payment link lookup failed: {e}",
+              flush=True)
+    return None
+
+
+def _attribute_referral(con, obj, email):
+    """Checkout completed with a client_reference_id: resolve the
+    referral code to a member and record the attribution, or
+    record why it was blocked. Called from the checkout handler
+    BEFORE trial enforcement stamps this subscription, so the
+    identity registry still shows any prior identity use."""
+    try:
+        code = (obj.get("client_reference_id") or "").strip().upper()
+        if not code or obj.get("mode") != "subscription":
+            return
+        friend = con.execute(
+            """SELECT plan, status, stripe_customer_id,
+               stripe_subscription_id, tv_username, referred_by
+               FROM site_subs WHERE email=?""", (email,)).fetchone()
+        if not friend:
+            return
+        plan, _st, f_cust, f_sub, f_tv, already = friend
+        if already or con.execute(
+                "SELECT 1 FROM referrals WHERE friend_email=?",
+                (email,)).fetchone():
+            return
+        now = time.time()
+
+        def blocked(referrer, note):
+            con.execute(
+                """INSERT OR IGNORE INTO referrals(friend_email,
+                       referrer_email, state, created_ts, note)
+                   VALUES(?,?, 'blocked', ?, ?)""",
+                (email, referrer, now, note))
+            print(f"[referral] blocked: friend={email} "
+                  f"referrer={referrer} reason={note}", flush=True)
+
+        if plan != "Monthly":
+            blocked(None, "not_monthly_plan")
+            return
+        referrer = None
+        for (em, st, cust, tv) in con.execute(
+                """SELECT email, status, stripe_customer_id,
+                   tv_username FROM site_subs""").fetchall():
+            if _ref_code(em) == code:
+                referrer = (em, st, cust, tv)
+                break
+        if not referrer:
+            blocked(None, "unknown_code")
+            return
+        r_email, r_status, r_cust, r_tv = referrer
+        if r_email == email or (f_cust and r_cust and f_cust == r_cust):
+            blocked(r_email, "self_referral")
+            return
+        if r_status not in REF_GOOD:
+            blocked(r_email, "referrer_not_a_member")
+            return
+        prior = con.execute(
+            """SELECT trial_used_ts FROM identity_flags
+               WHERE kind='email' AND key=?""", (email,)).fetchone()
+        if prior and prior[0]:
+            blocked(r_email, "returning_identity")
+            return
+        f_fp = _stripe_card_fingerprint(f_cust)
+        r_fp = _stripe_card_fingerprint(r_cust)
+        if f_fp and r_fp and f_fp == r_fp:
+            blocked(r_email, "same_card")
+            return
+        if f_tv and r_tv and _norm_tv(f_tv) == _norm_tv(r_tv):
+            blocked(r_email, "same_tradingview")
+            return
+        con.execute(
+            """UPDATE site_subs SET referred_by=?, ref_state='pending',
+               updated_ts=? WHERE email=?""", (r_email, now, email))
+        con.execute(
+            """INSERT OR IGNORE INTO referrals(friend_email,
+                   referrer_email, state, created_ts)
+               VALUES(?,?, 'pending', ?)""", (email, r_email, now))
+        _stripe_stamp_referral(sub_id=f_sub, customer_id=f_cust,
+                               by=r_email, state="pending")
+        print(f"[referral] attributed: friend={email} "
+              f"referrer={r_email}", flush=True)
+    except Exception as e:
+        print(f"[referral] attribution failed for {email}: {e}",
+              flush=True)
+
+
+def _on_invoice_paid(con, obj):
+    """invoice.paid: (a) a referred friend's first real charge
+    starts their 3-day clearance clock; (b) a referrer's invoice
+    that consumed customer balance burns one banked month."""
+    email = _find_sub(con, obj)
+    if not email:
+        return
+    row = con.execute(
+        """SELECT referred_by, first_charge_ts,
+           stripe_subscription_id FROM site_subs WHERE email=?""",
+        (email,)).fetchone()
+    if row and row[0] and not row[1] and (obj.get("amount_paid") or 0) > 0:
+        ts = (obj.get("status_transitions") or {}).get("paid_at") \
+            or obj.get("created") or time.time()
+        con.execute(
+            "UPDATE site_subs SET first_charge_ts=? WHERE email=?",
+            (ts, email))
+        con.execute(
+            "UPDATE referrals SET charge_ts=? WHERE friend_email=?",
+            (ts, email))
+        _stripe_stamp_referral(sub_id=row[2], charge_ts=ts)
+        print(f"[referral] first charge recorded: {email} "
+              f"ts={int(ts)}", flush=True)
+    start_bal = obj.get("starting_balance")
+    end_bal = obj.get("ending_balance")
+    cust = obj.get("customer")
+    if cust and isinstance(start_bal, int) and \
+            isinstance(end_bal, int) and end_bal > start_bal:
+        r = con.execute(
+            """SELECT email, ref_bank FROM site_subs
+               WHERE stripe_customer_id=?""", (cust,)).fetchone()
+        if r and (r[1] or 0) > 0:
+            con.execute(
+                "UPDATE site_subs SET ref_bank=? WHERE email=?",
+                (r[1] - 1, r[0]))
+            _stripe_stamp_referral(customer_id=cust, bank=r[1] - 1)
+            print(f"[referral] banked month consumed: {r[0]} "
+                  f"bank now {r[1] - 1}", flush=True)
+
+
+def _referral_run():
+    """The earning pass (keyed /referrals/run, cron-driven):
+    pending referrals whose friend's first charge is paid, past
+    the 3-day refund window, not refunded and not cancelled earn
+    the referrer one banked free month as Stripe customer
+    balance. Falls back to reading the friend's invoices from
+    Stripe when no invoice.paid webhook was ever seen, so the
+    pass works even if that event is not enabled on the
+    endpoint."""
+    out = {"earned": [], "voided": [], "waiting": 0, "bank_full": 0,
+           "errors": []}
+    now = time.time()
+    con = _subs_db()
+    try:
+        pend = con.execute(
+            """SELECT friend_email, referrer_email FROM referrals
+               WHERE state='pending'""").fetchall()
+        for friend_email, referrer_email in pend:
+            try:
+                friend = con.execute(
+                    """SELECT status, first_charge_ts,
+                       stripe_subscription_id, stripe_customer_id
+                       FROM site_subs WHERE email=?""",
+                    (friend_email,)).fetchone()
+                if not friend:
+                    con.execute(
+                        """UPDATE referrals SET state='void',
+                           note='friend row gone'
+                           WHERE friend_email=?""", (friend_email,))
+                    out["voided"].append(
+                        {"friend": friend_email,
+                         "reason": "friend row gone"})
+                    continue
+                f_status, charge_ts, f_sub, f_cust = friend
+                if f_status in ("canceled", "unpaid", "refunded"):
+                    con.execute(
+                        """UPDATE referrals SET state='void',
+                           note=? WHERE friend_email=?""",
+                        (f"friend {f_status}", friend_email))
+                    con.execute(
+                        """UPDATE site_subs SET ref_state='void'
+                           WHERE email=?""", (friend_email,))
+                    _stripe_stamp_referral(sub_id=f_sub,
+                                           customer_id=f_cust,
+                                           state="void")
+                    out["voided"].append(
+                        {"friend": friend_email,
+                         "reason": f"friend {f_status}"})
+                    continue
+                if not charge_ts and f_sub and STRIPE_SECRET_KEY \
+                        and not SBYB_TEST_MODE:
+                    try:
+                        invs = _stripe_get(
+                            f"invoices?subscription={f_sub}"
+                            "&status=paid&limit=1").get("data") or []
+                        if invs:
+                            charge_ts = (invs[0].get(
+                                "status_transitions") or {}).get(
+                                "paid_at") or invs[0].get("created")
+                            if charge_ts:
+                                con.execute(
+                                    """UPDATE site_subs
+                                       SET first_charge_ts=?
+                                       WHERE email=?""",
+                                    (charge_ts, friend_email))
+                                con.execute(
+                                    """UPDATE referrals
+                                       SET charge_ts=?
+                                       WHERE friend_email=?""",
+                                    (charge_ts, friend_email))
+                                _stripe_stamp_referral(
+                                    sub_id=f_sub, charge_ts=charge_ts)
+                    except Exception as e:
+                        out["errors"].append(
+                            f"invoice read for {friend_email}: {e}")
+                if not charge_ts or now < charge_ts + REF_WINDOW_SECS:
+                    out["waiting"] += 1
+                    continue
+                refunded = con.execute(
+                    """SELECT refund_used_ts FROM identity_flags
+                       WHERE kind='email' AND key=?""",
+                    (friend_email,)).fetchone()
+                if refunded and refunded[0]:
+                    con.execute(
+                        """UPDATE referrals SET state='void',
+                           note='friend refunded'
+                           WHERE friend_email=?""", (friend_email,))
+                    con.execute(
+                        """UPDATE site_subs SET ref_state='void'
+                           WHERE email=?""", (friend_email,))
+                    _stripe_stamp_referral(sub_id=f_sub,
+                                           customer_id=f_cust,
+                                           state="void")
+                    out["voided"].append(
+                        {"friend": friend_email,
+                         "reason": "friend refunded"})
+                    continue
+                referrer = con.execute(
+                    """SELECT plan, stripe_customer_id, ref_bank,
+                       ref_earned, stripe_subscription_id
+                       FROM site_subs WHERE email=?""",
+                    (referrer_email,)).fetchone()
+                if not referrer:
+                    out["errors"].append(
+                        f"referrer row missing: {referrer_email}")
+                    continue
+                r_plan, r_cust, r_bank, r_earned, r_sub = referrer
+                r_bank = r_bank or 0
+                r_earned = r_earned or 0
+                if r_bank >= REF_CAP:
+                    out["bank_full"] += 1
+                    continue
+                cents = REF_CREDIT_CENTS.get(r_plan, 2000)
+                if not SBYB_TEST_MODE:
+                    if not r_cust:
+                        out["errors"].append(
+                            f"referrer has no Stripe customer: "
+                            f"{referrer_email}")
+                        continue
+                    _stripe_post(
+                        f"customers/{r_cust}/balance_transactions",
+                        {"amount": str(-cents), "currency": "usd",
+                         "description": "Give a month, get a month "
+                                        "- referral free month"})
+                con.execute(
+                    """UPDATE site_subs SET ref_bank=?, ref_earned=?
+                       WHERE email=?""",
+                    (r_bank + 1, r_earned + 1, referrer_email))
+                con.execute(
+                    """UPDATE referrals SET state='earned',
+                       earned_ts=? WHERE friend_email=?""",
+                    (now, friend_email))
+                con.execute(
+                    """UPDATE site_subs SET ref_state='earned'
+                       WHERE email=?""", (friend_email,))
+                _stripe_stamp_referral(customer_id=r_cust,
+                                       bank=r_bank + 1,
+                                       earned=r_earned + 1)
+                _stripe_stamp_referral(sub_id=f_sub,
+                                       customer_id=f_cust,
+                                       state="earned")
+                out["earned"].append(
+                    {"referrer": referrer_email,
+                     "friend": friend_email, "cents": cents,
+                     "bank": r_bank + 1})
+                print(f"[referral] earned: {referrer_email} +1 "
+                      f"month ({cents}c) from {friend_email}, "
+                      f"bank {r_bank + 1}", flush=True)
+            except Exception as e:
+                out["errors"].append(f"{friend_email}: {e}")
+        con.commit()
+    finally:
+        con.close()
+    return out
+
+
+def _referral_info(email):
+    """A member's referral snapshot for the /access and /referral
+    pages, or None when the email is not a paying member."""
+    con = _subs_db()
+    try:
+        row = con.execute(
+            """SELECT plan, status, ref_bank, ref_earned
+               FROM site_subs WHERE email=?""", (email,)).fetchone()
+        if not row or (row[1] not in REF_GOOD and row[0] != "Lifetime"):
+            return None
+        friends = con.execute(
+            """SELECT state, COUNT(*) FROM referrals
+               WHERE referrer_email=? GROUP BY state""",
+            (email,)).fetchall()
+        return {"plan": row[0], "bank": row[2] or 0,
+                "earned": row[3] or 0,
+                "friends": {s: n for s, n in friends},
+                "code": _ref_code(email),
+                "link": f"{GATE_BASE}/ref/{_ref_code(email)}"}
+    finally:
+        con.close()
+
+
+def _referral_block(email):
+    """The give-a-month block on the /access success page."""
+    info = _referral_info(email)
+    if not info:
+        return ""
+    return (
+        '<div class="small" style="margin-top:22px">'
+        "<b>Give a month, get a month.</b> Share your referral "
+        "link - a friend who joins Monthly through it gets their "
+        "first month for $10 instead of $20, and once their first "
+        "payment clears, a free month lands on your next renewal. "
+        f'Your link: <b>{info["link"]}</b> - free months banked: '
+        f'{info["bank"]} - <a href="/referral">how it works</a>'
+        "</div>")
 
 
 # ---------- website support chatbot (POST /support-chat) ----------
