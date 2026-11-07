@@ -2953,7 +2953,15 @@ def _stripe_post(path: str, fields: dict) -> dict:
     req = urllib.request.Request(f"https://api.stripe.com/v1/{path}",
                                  data=data, method="POST")
     req.add_header("Authorization", f"Bearer {STRIPE_SECRET_KEY}")
-    return json.loads(urllib.request.urlopen(req, timeout=20).read())
+    try:
+        return json.loads(urllib.request.urlopen(req, timeout=20).read())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "replace")[:400]
+        except Exception:
+            detail = ""
+        raise RuntimeError(
+            f"stripe POST {path} -> HTTP {e.code}: {detail}")
 
 
 def _stripe_welcomed_ts(sub_id):
