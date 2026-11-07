@@ -878,6 +878,23 @@ def _subs_db():
         friend_email TEXT PRIMARY KEY, referrer_email TEXT,
         state TEXT, created_ts REAL, charge_ts REAL, earned_ts REAL,
         note TEXT)""")
+    # Ledger completeness (Nov 7 2026 tracking pass): the moment a
+    # banked reward is actually consumed by a renewal is recorded
+    # (applied_ts, FIFO per referrer), and the friend row carries
+    # the durable copies (ref_earned_ts / ref_applied_ts /
+    # ref_note) so the whole ledger rebuilds from Stripe metadata
+    # after a wipe.
+    ref_cols = {r[1] for r in con.execute("PRAGMA table_info(referrals)")}
+    if "applied_ts" not in ref_cols:
+        con.execute("ALTER TABLE referrals ADD COLUMN applied_ts REAL")
+    if "ref_earned_ts" not in cols:
+        con.execute(
+            "ALTER TABLE site_subs ADD COLUMN ref_earned_ts REAL")
+    if "ref_applied_ts" not in cols:
+        con.execute(
+            "ALTER TABLE site_subs ADD COLUMN ref_applied_ts REAL")
+    if "ref_note" not in cols:
+        con.execute("ALTER TABLE site_subs ADD COLUMN ref_note TEXT")
     # One-trial / one-refund identity registry (Nov 2 2026). Local
     # mirror only - the durable stamps live on Stripe (subscription +
     # customer metadata) and this table is rebuilt from them at boot
@@ -1544,6 +1561,34 @@ def referrals_run(key: str = ""):
     return _referral_run()
 
 
+@app.get("/stripe/referrals")
+def stripe_referrals(key: str = ""):
+    """Keyed: the full referral ledger - every member's code,
+    everyone who joined through it, each referred signup's
+    lifecycle stage, and blocked attempts with their reason."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _subs_db()
+    try:
+        return {"referrals": _referral_ledger(con)}
+    finally:
+        con.close()
+
+
+@app.get("/stripe/referral-events")
+def stripe_referral_events(key: str = "", since: float = 0):
+    """Keyed: referral events at or after `since` (unix seconds)
+    for the daily subscriber digest - referred_signup,
+    referral_blocked, reward_banked, reward_applied."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _subs_db()
+    try:
+        return {"events": _referral_events(con, since)}
+    finally:
+        con.close()
+
+
 @app.post("/stripe/referral-setup")
 def stripe_referral_setup(key: str = ""):
     """Keyed, idempotent: make sure the referral coupon ($10 off
@@ -1576,8 +1621,13 @@ def stripe_referral_setup(key: str = ""):
              if p.get("code") == REF_PROMO_CODE and p.get("active")),
             None)
         if not promo:
+            # This account's API version wants the coupon nested
+            # under promotion[...] (the flat coupon param is
+            # rejected as unknown).
             promo = _stripe_post("promotion_codes", {
-                "coupon": coupon.get("id"), "code": REF_PROMO_CODE,
+                "promotion[type]": "coupon",
+                "promotion[coupon]": coupon.get("id"),
+                "code": REF_PROMO_CODE,
                 "metadata[sbyb]": "referral10"})
         out["promo_code"] = promo.get("code")
         links = _stripe_get("payment_links?limit=100").get("data") or []
@@ -1693,7 +1743,8 @@ def stripe_subs(key: str = ""):
                stripe_subscription_id, checkout_session_id, invite_link,
                current_period_end, created_ts, updated_ts, tv_username,
                welcome_sent_ts, trial_repeat, referred_by, ref_state,
-               first_charge_ts, ref_bank, ref_earned
+               first_charge_ts, ref_bank, ref_earned, ref_earned_ts,
+               ref_applied_ts
                FROM site_subs""").fetchall()
         flags = {r[0]: (r[1], r[2]) for r in con.execute(
             "SELECT key, trial_used_ts, refund_used_ts "
@@ -1704,7 +1755,8 @@ def stripe_subs(key: str = ""):
             "stripe_subscription_id", "checkout_session_id", "invite_link",
             "current_period_end", "created_ts", "updated_ts", "tv_username",
             "welcome_sent_ts", "trial_repeat", "referred_by", "ref_state",
-            "first_charge_ts", "ref_bank", "ref_earned")
+            "first_charge_ts", "ref_bank", "ref_earned", "ref_earned_ts",
+            "ref_applied_ts")
     subs = []
     for r in rows:
         d = dict(zip(cols, r))
@@ -3460,6 +3512,21 @@ def _self_heal_subs():
 
                 ref_bank_v = _meta_int("sbyb_ref_bank")
                 ref_earned_v = _meta_int("sbyb_ref_earned")
+                ref_earned_ts_v = None
+                if merged_meta.get("sbyb_ref_earned_ts"):
+                    try:
+                        ref_earned_ts_v = float(
+                            merged_meta["sbyb_ref_earned_ts"])
+                    except (TypeError, ValueError):
+                        ref_earned_ts_v = None
+                ref_applied_ts_v = None
+                if merged_meta.get("sbyb_ref_applied_ts"):
+                    try:
+                        ref_applied_ts_v = float(
+                            merged_meta["sbyb_ref_applied_ts"])
+                    except (TypeError, ValueError):
+                        ref_applied_ts_v = None
+                ref_note_v = merged_meta.get("sbyb_ref_note") or None
                 con.execute(
                     """INSERT INTO site_subs(email, plan, status,
                            stripe_customer_id, stripe_subscription_id,
@@ -3467,8 +3534,9 @@ def _self_heal_subs():
                            current_period_end, created_ts, updated_ts,
                            tv_username, welcome_sent_ts, canceled_ts,
                            referred_by, ref_state, first_charge_ts,
-                           ref_bank, ref_earned)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                           ref_bank, ref_earned, ref_earned_ts,
+                           ref_applied_ts, ref_note)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(email) DO UPDATE SET
                          plan=excluded.plan,
                          status=CASE WHEN site_subs.status='refunded'
@@ -3509,12 +3577,22 @@ def _self_heal_subs():
                          ref_earned=COALESCE(
                              site_subs.ref_earned,
                              excluded.ref_earned),
+                         ref_earned_ts=COALESCE(
+                             site_subs.ref_earned_ts,
+                             excluded.ref_earned_ts),
+                         ref_applied_ts=COALESCE(
+                             site_subs.ref_applied_ts,
+                             excluded.ref_applied_ts),
+                         ref_note=COALESCE(
+                             site_subs.ref_note,
+                             excluded.ref_note),
                          updated_ts=excluded.updated_ts""",
                     (email, plan, sub.get("status"), customer.get("id"),
                      sub.get("id"), None, None, period_end, sub_created,
                      now, tv_restore, meta_welcomed,
                      sub.get("canceled_at"), ref_by, ref_state_v,
-                     ref_charge, ref_bank_v, ref_earned_v))
+                     ref_charge, ref_bank_v, ref_earned_v,
+                     ref_earned_ts_v, ref_applied_ts_v, ref_note_v))
                 healed += 1
             con.commit()
             # Rebuild the one-trial / one-refund identity registry
@@ -3565,11 +3643,20 @@ def _self_heal_subs():
             # wipe (credit counts ride the customer stamps above).
             con.execute(
                 """INSERT OR IGNORE INTO referrals(friend_email,
-                       referrer_email, state, created_ts, charge_ts)
+                       referrer_email, state, created_ts, charge_ts,
+                       earned_ts, applied_ts)
                    SELECT email, referred_by,
                        COALESCE(ref_state, 'pending'), created_ts,
-                       first_charge_ts FROM site_subs
+                       first_charge_ts, ref_earned_ts, ref_applied_ts
+                   FROM site_subs
                    WHERE referred_by IS NOT NULL""")
+            con.execute(
+                """INSERT OR IGNORE INTO referrals(friend_email,
+                       referrer_email, state, created_ts, note)
+                   SELECT email, NULL, 'blocked', created_ts, ref_note
+                   FROM site_subs
+                   WHERE ref_state='blocked'
+                     AND referred_by IS NULL""")
             con.commit()
             # Backfill: a row already sitting at 'refunded' whose
             # identity has no refund stamp yet (the refund landed
@@ -3643,7 +3730,8 @@ def _ref_code(email):
 
 def _stripe_stamp_referral(sub_id=None, customer_id=None, by=None,
                            state=None, charge_ts=None, bank=None,
-                           earned=None):
+                           earned=None, earned_ts=None,
+                           applied_ts=None, note=None):
     """Persist referral markers on Stripe (same pattern as the
     identity stamps): the durable copy that the boot self-heal
     restores from. Best effort, never raises."""
@@ -3658,6 +3746,12 @@ def _stripe_stamp_referral(sub_id=None, customer_id=None, by=None,
         fields["metadata[sbyb_ref_bank]"] = str(int(bank))
     if earned is not None:
         fields["metadata[sbyb_ref_earned]"] = str(int(earned))
+    if earned_ts:
+        fields["metadata[sbyb_ref_earned_ts]"] = str(int(earned_ts))
+    if applied_ts:
+        fields["metadata[sbyb_ref_applied_ts]"] = str(int(applied_ts))
+    if note:
+        fields["metadata[sbyb_ref_note]"] = note[:120]
     if not fields or not STRIPE_SECRET_KEY or SBYB_TEST_MODE:
         return
     if sub_id:
@@ -3725,11 +3819,22 @@ def _attribute_referral(con, obj, email):
         now = time.time()
 
         def blocked(referrer, note):
+            # Blocked attempts stay in the ledger WITH the matched
+            # identity key named in the note (never the card
+            # fingerprint value itself), and the block is stamped
+            # on the friend's Stripe record so a wipe cannot drop
+            # it from the ledger.
             con.execute(
                 """INSERT OR IGNORE INTO referrals(friend_email,
                        referrer_email, state, created_ts, note)
                    VALUES(?,?, 'blocked', ?, ?)""",
                 (email, referrer, now, note))
+            con.execute(
+                """UPDATE site_subs SET ref_state='blocked',
+                   ref_note=?, updated_ts=? WHERE email=?""",
+                (note, now, email))
+            _stripe_stamp_referral(sub_id=f_sub, customer_id=f_cust,
+                                   state="blocked", note=note)
             print(f"[referral] blocked: friend={email} "
                   f"referrer={referrer} reason={note}", flush=True)
 
@@ -3748,7 +3853,7 @@ def _attribute_referral(con, obj, email):
             return
         r_email, r_status, r_cust, r_tv = referrer
         if r_email == email or (f_cust and r_cust and f_cust == r_cust):
-            blocked(r_email, "self_referral")
+            blocked(r_email, "self_referral:email")
             return
         if r_status not in REF_GOOD:
             blocked(r_email, "referrer_not_a_member")
@@ -3757,15 +3862,15 @@ def _attribute_referral(con, obj, email):
             """SELECT trial_used_ts FROM identity_flags
                WHERE kind='email' AND key=?""", (email,)).fetchone()
         if prior and prior[0]:
-            blocked(r_email, "returning_identity")
+            blocked(r_email, "returning_identity:email")
             return
         f_fp = _stripe_card_fingerprint(f_cust)
         r_fp = _stripe_card_fingerprint(r_cust)
         if f_fp and r_fp and f_fp == r_fp:
-            blocked(r_email, "same_card")
+            blocked(r_email, "same_card:card_fingerprint")
             return
         if f_tv and r_tv and _norm_tv(f_tv) == _norm_tv(r_tv):
-            blocked(r_email, "same_tradingview")
+            blocked(r_email, f"same_tradingview:tv:{_norm_tv(f_tv)}")
             return
         con.execute(
             """UPDATE site_subs SET referred_by=?, ref_state='pending',
@@ -3821,6 +3926,33 @@ def _on_invoice_paid(con, obj):
             _stripe_stamp_referral(customer_id=cust, bank=r[1] - 1)
             print(f"[referral] banked month consumed: {r[0]} "
                   f"bank now {r[1] - 1}", flush=True)
+            # Ledger: the consumed month is the referrer's OLDEST
+            # unapplied earned reward (FIFO) - stamp it applied so
+            # the ledger shows reward banked -> reward applied.
+            nxt = con.execute(
+                """SELECT friend_email FROM referrals
+                   WHERE referrer_email=? AND state='earned'
+                     AND applied_ts IS NULL
+                   ORDER BY earned_ts LIMIT 1""", (r[0],)).fetchone()
+            if nxt:
+                applied_now = time.time()
+                con.execute(
+                    """UPDATE referrals SET applied_ts=?
+                       WHERE friend_email=?""",
+                    (applied_now, nxt[0]))
+                con.execute(
+                    """UPDATE site_subs SET ref_applied_ts=?
+                       WHERE email=?""", (applied_now, nxt[0]))
+                frow = con.execute(
+                    """SELECT stripe_subscription_id,
+                       stripe_customer_id FROM site_subs
+                       WHERE email=?""", (nxt[0],)).fetchone()
+                if frow:
+                    _stripe_stamp_referral(
+                        sub_id=frow[0], customer_id=frow[1],
+                        applied_ts=applied_now)
+                print(f"[referral] reward applied: {r[0]} "
+                      f"(from {nxt[0]})", flush=True)
 
 
 def _referral_run():
@@ -3956,14 +4088,15 @@ def _referral_run():
                        earned_ts=? WHERE friend_email=?""",
                     (now, friend_email))
                 con.execute(
-                    """UPDATE site_subs SET ref_state='earned'
-                       WHERE email=?""", (friend_email,))
+                    """UPDATE site_subs SET ref_state='earned',
+                       ref_earned_ts=? WHERE email=?""",
+                    (now, friend_email))
                 _stripe_stamp_referral(customer_id=r_cust,
                                        bank=r_bank + 1,
                                        earned=r_earned + 1)
                 _stripe_stamp_referral(sub_id=f_sub,
                                        customer_id=f_cust,
-                                       state="earned")
+                                       state="earned", earned_ts=now)
                 out["earned"].append(
                     {"referrer": referrer_email,
                      "friend": friend_email, "cents": cents,
@@ -3977,6 +4110,78 @@ def _referral_run():
     finally:
         con.close()
     return out
+
+
+def _referral_stage(state, friend_status, charge_ts, earned_ts,
+                    applied_ts, now):
+    """The ledger lifecycle, derived from the stored state plus
+    the friend's timestamps: signed_up -> in_trial ->
+    first_charge_paid -> window_cleared -> reward_banked ->
+    reward_applied (blocked and void are terminal side states)."""
+    if state == "blocked":
+        return "blocked"
+    if state == "void":
+        return "void"
+    if applied_ts:
+        return "reward_applied"
+    if state == "earned" or earned_ts:
+        return "reward_banked"
+    if charge_ts:
+        return "window_cleared" if now >= charge_ts + REF_WINDOW_SECS \
+            else "first_charge_paid"
+    if friend_status == "trialing":
+        return "in_trial"
+    return "signed_up"
+
+
+def _referral_ledger(con):
+    now = time.time()
+    out = []
+    for r in con.execute(
+            """SELECT f.friend_email, f.referrer_email, f.state,
+               f.created_ts, f.charge_ts, f.earned_ts, f.applied_ts,
+               f.note, s.status, s.plan
+               FROM referrals f
+               LEFT JOIN site_subs s ON s.email = f.friend_email
+               ORDER BY f.created_ts""").fetchall():
+        (fe, re_, st, c_ts, ch_ts, e_ts, a_ts, note, f_status,
+         f_plan) = r
+        out.append({
+            "friend": fe, "referrer": re_,
+            "code": _ref_code(re_) if re_ else None,
+            "state": st,
+            "stage": _referral_stage(st, f_status, ch_ts, e_ts,
+                                     a_ts, now),
+            "friend_status": f_status, "friend_plan": f_plan,
+            "created_ts": c_ts, "charge_ts": ch_ts,
+            "earned_ts": e_ts, "applied_ts": a_ts, "note": note})
+    return out
+
+
+def _referral_events(con, since):
+    """Flat event stream for the daily subscriber digest:
+    referred_signup, referral_blocked, reward_banked and
+    reward_applied, each timestamped, so the digest can report
+    referral movement since its last run without a new report
+    of its own."""
+    evs = []
+    for r in _referral_ledger(con):
+        base = {"referrer": r["referrer"], "friend": r["friend"],
+                "code": r["code"]}
+        if r["created_ts"] and r["created_ts"] >= since:
+            evs.append({**base, "ts": r["created_ts"],
+                        "type": "referral_blocked"
+                        if r["state"] == "blocked"
+                        else "referred_signup",
+                        "note": r["note"]})
+        if r["earned_ts"] and r["earned_ts"] >= since:
+            evs.append({**base, "ts": r["earned_ts"],
+                        "type": "reward_banked", "note": None})
+        if r["applied_ts"] and r["applied_ts"] >= since:
+            evs.append({**base, "ts": r["applied_ts"],
+                        "type": "reward_applied", "note": None})
+    evs.sort(key=lambda e: e["ts"])
+    return evs
 
 
 def _referral_info(email):
