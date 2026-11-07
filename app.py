@@ -1538,7 +1538,8 @@ async def referral_submit(request: Request):
     joined = fr.get("pending", 0) + fr.get("earned", 0)
     body = (
         '<div class="big">Your referral link</div>'
-        f'<p><b>{info["link"]}</b></p>'
+        f'<p><span id="reflink"><b>{info["link"]}</b></span></p>'
+        f'{_referral_share_html(info["link"])}'
         "<p>Share it anywhere. A friend who joins Monthly "
         "through it gets their first month for $10 instead of "
         "$20, and once their first payment clears the 3-day "
@@ -4207,6 +4208,50 @@ def _referral_info(email):
         con.close()
 
 
+def _referral_share_html(link):
+    """One-tap controls for a member's referral link (Nov 7 2026
+    UX pass): a COPY LINK button (clipboard API first; where it
+    is missing or refuses - some in-app browsers, Telegram's
+    included - fall back to selecting the link text so it can be
+    copied by hand, with a note saying so) and a SHARE button
+    that only appears where navigator.share exists. The visible
+    link text itself stays on the page either way."""
+    return (
+        '<div style="margin:10px 0">'
+        '<button type="button" class="btn" '
+        'style="padding:9px 16px;font-size:13px" '
+        'onclick="sbybCopyRef(this)">COPY LINK</button> '
+        '<button type="button" class="btn" id="refshare" '
+        'style="padding:9px 16px;font-size:13px;display:none" '
+        'onclick="sbybShareRef()">SHARE</button>'
+        '<div class="small" id="refmsg" style="margin-top:6px">'
+        "</div></div>"
+        "<script>"
+        f"var SBYB_REF_URL = {json.dumps(link)};"
+        "function sbybRefMsg(t){var m=document.getElementById("
+        "'refmsg');if(m){m.textContent=t;}}"
+        "function sbybSelectRef(){var el=document.getElementById("
+        "'reflink');if(!el){return;}try{var r=document."
+        "createRange();r.selectNodeContents(el);var s=window."
+        "getSelection();s.removeAllRanges();s.addRange(r);}"
+        "catch(e){}sbybRefMsg('Link selected - long-press it "
+        "to copy.');}"
+        "function sbybCopyRef(btn){function ok(){btn.textContent"
+        "='COPIED';sbybRefMsg('Copied - paste it anywhere.');"
+        "setTimeout(function(){btn.textContent='COPY LINK';},"
+        "2000);}if(navigator.clipboard&&navigator.clipboard."
+        "writeText){navigator.clipboard.writeText(SBYB_REF_URL)"
+        ".then(ok,function(){sbybSelectRef();});}else{"
+        "sbybSelectRef();}}"
+        "function sbybShareRef(){if(navigator.share){navigator."
+        "share({title:'SpyBeforeYouBuy',text:'Join SpyBeforeYouBuy "
+        "through my link - your first month of Monthly is $10 "
+        "instead of $20.',url:SBYB_REF_URL}).catch(function(){});}}"
+        "if(navigator.share){var b=document.getElementById("
+        "'refshare');if(b){b.style.display='inline-block';}}"
+        "</script>")
+
+
 def _referral_block(email):
     """The give-a-month block on the /access success page."""
     info = _referral_info(email)
@@ -4218,8 +4263,10 @@ def _referral_block(email):
         "link - a friend who joins Monthly through it gets their "
         "first month for $10 instead of $20, and once their first "
         "payment clears, a free month lands on your next renewal. "
-        f'Your link: <b>{info["link"]}</b> - free months banked: '
-        f'{info["bank"]} - <a href="/referral">how it works</a>'
+        f'Your link: <span id="reflink"><b>{info["link"]}</b></span>'
+        f'{_referral_share_html(info["link"])}'
+        f'Free months banked: {info["bank"]} - '
+        '<a href="/referral">how it works</a>'
         "</div>")
 
 
