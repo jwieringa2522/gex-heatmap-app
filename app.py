@@ -4198,7 +4198,7 @@ def _scripted_answer(q: str) -> str | None:
         return ("For a disputed or unfamiliar charge, email "
                 f"{SUPPORT_EMAIL} with the email you subscribed "
                 "with, and it will be looked at properly. The refund "
-                "policy itself: a full refund inside the first 7 "
+                "policy itself: a full refund inside the first 3 "
                 "days of a first purchase, one refund per person, "
                 "ever - after that window all sales are final.")
     if phrase("refund me", "give me a refund", "want a refund",
