@@ -2788,7 +2788,7 @@ def _stripe_mark_welcomed(sub_id, ts) -> bool:
 # ---------- one free trial / one refund per person, ever ----------
 # Locked policy (Justin's order, Nov 2 2026): the 7-day Monthly trial
 # is one per person, ever, and a refund is one per person, ever
-# (first purchase, inside 7 days; renewals and Lifetime final).
+# (first purchase, inside 3 days; renewals and Lifetime final).
 #
 # Identity keys the app genuinely sees: the subscriber email, the
 # TradingView username (checkout custom field or the claim page),
@@ -3335,11 +3335,11 @@ _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
   free trial before, a new Monthly signup is charged right away,
   with no trial.
 - Refunds: one refund per person, ever - a full refund inside the
-  first 7 days of a first purchase only. After that window, or if
+  first 3 days of a first purchase only. After that window, or if
   you have already had a refund, all sales are final; renewals and
   Lifetime are always final. Cancelling during the free trial
   means the member is never charged, so there is nothing to
-  refund; the 7-day refund window runs from the first charge,
+  refund; the 3-day refund window runs from the first charge,
   when the trial converts. Refunds and cancellations are only
   ever processed by email to the support address, never in chat.
 - The core membership is the same on every full plan: private Telegram
@@ -3526,7 +3526,7 @@ def _scripted_answer(q: str) -> str | None:
                 "with and it will be taken care of there. The policy "
                 "it runs on: cancelling during the free trial means "
                 "no charge at all; a first purchase is refundable "
-                "inside 7 days of the charge, one refund per person, "
+                "inside 3 days of the charge, one refund per person, "
                 "ever; renewals and Lifetime are final after that "
                 "window.")
     if is_trial and is_cancel and is_refund:
@@ -3534,7 +3534,7 @@ def _scripted_answer(q: str) -> str | None:
                 "cancel during the 7-day free trial, you are never "
                 "charged, so there is nothing to refund. The refund "
                 "window starts when the trial ends and the first "
-                "charge lands: from that day you have 7 days to ask "
+                "charge lands: from that day you have 3 days to ask "
                 "for a refund on that first purchase, and it is one "
                 "refund per person, ever. Cancel after that window "
                 "and it just stops the next renewal - no refund, and "
@@ -3552,15 +3552,15 @@ def _scripted_answer(q: str) -> str | None:
                           "renewing")
                       or phrase("charged again", "second charge")):
         return ("Renewals are final - the refund window only "
-                "covers a first purchase, inside 7 days of that "
+                "covers a first purchase, inside 3 days of that "
                 "first charge. A renewal charge is not refundable, "
                 "but you can cancel anytime from your billing link "
                 "so it does not renew again, and your access runs "
                 "to the end of the period you paid for.")
     if is_refund and has("lifetime"):
         return ("Lifetime follows the same window as any first "
-                "purchase: ask within 7 days of buying it and it "
-                "is refunded in full. After those 7 days it is "
+                "purchase: ask within 3 days of buying it and it "
+                "is refunded in full. After those 3 days it is "
                 "final. And it is one refund per person, ever - if "
                 "you have already had a refund, that one is used "
                 f"up. Email {SUPPORT_EMAIL} to ask inside the "
@@ -3571,18 +3571,18 @@ def _scripted_answer(q: str) -> str | None:
             "already had a refund"):
         return ("It is one refund per person, ever. If you have "
                 "already had a refund, a later purchase is final - "
-                "there is no second refund, even inside 7 days. "
+                "there is no second refund, even inside 3 days. "
                 "That is what the free trial is for: Monthly gives "
                 "you 7 days to try everything before any charge.")
     if is_refund and phrase("how long"):
         return ("Refunds are handled by email - write to "
                 f"{SUPPORT_EMAIL} with the email you subscribed "
-                "with. Inside the policy window (first 7 days of a "
+                "with. Inside the policy window (first 3 days of a "
                 "first purchase, one per person, ever) it is "
                 "refunded in full to the card you paid with.")
     if has("refund", "refunds") or phrase("money back"):
         return ("Yes - on a first purchase, and it is one refund "
-                "per person, ever. Ask within 7 days of the "
+                "per person, ever. Ask within 3 days of the "
                 "charge and it is refunded in full. After that window, "
                 "renewals and Lifetime are final. Monthly also starts "
                 "with a 7-day free trial, so you can try everything "
@@ -3600,7 +3600,7 @@ def _scripted_answer(q: str) -> str | None:
                 "Cancelling stops future charges, and your access runs "
                 "to the end of the period you have paid for, or to the "
                 "end of your trial. A first purchase is refundable "
-                "within 7 days (one refund per person, ever); "
+                "within 3 days (one refund per person, ever); "
                 "renewals and Lifetime are final after that window.")
     if has("upgrade", "downgrade") or (
             has("change", "switch") and has("plan", "plans")):
