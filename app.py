@@ -3337,7 +3337,11 @@ _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
 - Refunds: one refund per person, ever - a full refund inside the
   first 7 days of a first purchase only. After that window, or if
   you have already had a refund, all sales are final; renewals and
-  Lifetime are always final.
+  Lifetime are always final. Cancelling during the free trial
+  means the member is never charged, so there is nothing to
+  refund; the 7-day refund window runs from the first charge,
+  when the trial converts. Refunds and cancellations are only
+  ever processed by email to the support address, never in chat.
 - The core membership is the same on every full plan: private Telegram
   channel alerts (day, swing and options), the GEX heatmap app, the
   pre-market Gamma Brief, the daily whale scanner, custom TradingView
@@ -3494,6 +3498,88 @@ def _scripted_answer(q: str) -> str | None:
         return (f"You can reach support at {SUPPORT_EMAIL}. For plan "
                 "or access questions, include the email you subscribed "
                 "with.")
+    # ---- Refund / cancel scenarios (Nov 7 2026): follow-ups that
+    # mix trial, cancel and refund used to get the stock refund
+    # paragraph repeated back word for word. These compose an
+    # answer to the scenario actually asked, from the same locked
+    # policy. Anything asking for a refund or cancellation to be
+    # PROCESSED is directed to support@ - policy info only here.
+    is_refund = has("refund", "refunds") or phrase("money back")
+    is_trial = has("trial")
+    is_cancel = has("cancel", "cancelling", "cancellation",
+                    "cancelled")
+    if phrase("chargeback", "charge back") or has(
+            "dispute", "disputed", "unauthorized", "fraud"):
+        return ("For a disputed or unfamiliar charge, email "
+                f"{SUPPORT_EMAIL} with the email you subscribed "
+                "with, and it will be looked at properly. The refund "
+                "policy itself: a full refund inside the first 7 "
+                "days of a first purchase, one refund per person, "
+                "ever - after that window all sales are final.")
+    if phrase("refund me", "give me a refund", "want a refund",
+              "need a refund", "get my money back", "refund my") or (
+            is_cancel and phrase("cancel my", "cancel it",
+                                 "please cancel")
+            and not has("how")):
+        return ("I cannot process that from this chat - email "
+                f"{SUPPORT_EMAIL} with the email you subscribed "
+                "with and it will be taken care of there. The policy "
+                "it runs on: cancelling during the free trial means "
+                "no charge at all; a first purchase is refundable "
+                "inside 7 days of the charge, one refund per person, "
+                "ever; renewals and Lifetime are final after that "
+                "window.")
+    if is_trial and is_cancel and is_refund:
+        return ("Good question - the trial changes it. If you "
+                "cancel during the 7-day free trial, you are never "
+                "charged, so there is nothing to refund. The refund "
+                "window starts when the trial ends and the first "
+                "charge lands: from that day you have 7 days to ask "
+                "for a refund on that first purchase, and it is one "
+                "refund per person, ever. Cancel after that window "
+                "and it just stops the next renewal - no refund, and "
+                "renewals and Lifetime are final. To ask inside "
+                f"the window, email {SUPPORT_EMAIL}.")
+    if is_trial and is_cancel and has(
+            "charge", "charged", "pay", "billed", "bill"):
+        return ("No - cancelling during the 7-day free trial means "
+                "you are never charged at all. Your access runs to "
+                "the end of the trial, and that is the end of it: "
+                "no charge, and nothing to refund. The card is only "
+                "charged if you are still subscribed when the trial "
+                "ends.")
+    if is_refund and (has("renewal", "renewed", "renews",
+                          "renewing")
+                      or phrase("charged again", "second charge")):
+        return ("Renewals are final - the refund window only "
+                "covers a first purchase, inside 7 days of that "
+                "first charge. A renewal charge is not refundable, "
+                "but you can cancel anytime from your billing link "
+                "so it does not renew again, and your access runs "
+                "to the end of the period you paid for.")
+    if is_refund and has("lifetime"):
+        return ("Lifetime follows the same window as any first "
+                "purchase: ask within 7 days of buying it and it "
+                "is refunded in full. After those 7 days it is "
+                "final. And it is one refund per person, ever - if "
+                "you have already had a refund, that one is used "
+                f"up. Email {SUPPORT_EMAIL} to ask inside the "
+                "window.")
+    if is_refund and phrase(
+            "second refund", "another refund", "refund again",
+            "refunded before", "already refunded",
+            "already had a refund"):
+        return ("It is one refund per person, ever. If you have "
+                "already had a refund, a later purchase is final - "
+                "there is no second refund, even inside 7 days. "
+                "That is what the free trial is for: Monthly gives "
+                "you 7 days to try everything before any charge.")
+    if is_refund and phrase("how long"):
+        return ("Refunds are handled by email - write to "
+                f"{SUPPORT_EMAIL} with the email you subscribed "
+                "with. Inside the policy window (first 7 days of a "
+                "first purchase, one per person, ever) it is "
+                "refunded in full to the card you paid with.")
     if has("refund", "refunds") or phrase("money back"):
         return ("Yes - on a first purchase, and it is one refund "
                 "per person, ever. Ask within 7 days of the "
