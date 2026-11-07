@@ -1471,7 +1471,9 @@ def ref_redirect(code: str):
     if referrer and link:
         sep = "&" if "?" in link else "?"
         return RedirectResponse(
-            f"{link}{sep}client_reference_id={code}", status_code=302)
+            f"{link}{sep}client_reference_id={code}"
+            f"&prefilled_promo_code={REF_PROMO_CODE}",
+            status_code=302)
     body = ('<div class="big">That referral link does not look '
             "right.</div><p>Check the link your friend sent you, "
             "or head to the site and pick Monthly from there - "
@@ -1567,6 +1569,17 @@ def stripe_referral_setup(key: str = ""):
                 "name": "Referral - first month $10 off",
                 "metadata[sbyb]": "referral10"})
         out["coupon_id"] = coupon.get("id")
+        promos = _stripe_get(
+            "promotion_codes?limit=100").get("data") or []
+        promo = next(
+            (p for p in promos
+             if p.get("code") == REF_PROMO_CODE and p.get("active")),
+            None)
+        if not promo:
+            promo = _stripe_post("promotion_codes", {
+                "coupon": coupon.get("id"), "code": REF_PROMO_CODE,
+                "metadata[sbyb]": "referral10"})
+        out["promo_code"] = promo.get("code")
         links = _stripe_get("payment_links?limit=100").get("data") or []
         link = next(
             (l for l in links
@@ -1594,9 +1607,8 @@ def stripe_referral_setup(key: str = ""):
             fields = {
                 "line_items[0][price]": price_id,
                 "line_items[0][quantity]": "1",
-                "discounts[0][coupon]": coupon.get("id"),
                 "metadata[sbyb]": "referral_monthly",
-                "allow_promotion_codes": "false"}
+                "allow_promotion_codes": "true"}
             sd = src_full.get("subscription_data") or {}
             if sd.get("trial_period_days"):
                 fields["subscription_data[trial_period_days]"] = \
@@ -3590,8 +3602,9 @@ def _self_heal_subs():
 # Locked rules (Justin's order, Nov 7 2026): every paying member
 # has a personal link /ref/<code>. A friend joining Monthly
 # through it gets their first month for $10 instead of $20 (a
-# $10-off-once coupon baked into a dedicated referral Payment
-# Link; attribution rides the checkout session's
+# $10-off-once coupon applied by a prefilled promotion code on
+# a dedicated referral Payment Link; attribution rides the
+# checkout session's
 # client_reference_id, which Payment Links pass through). When
 # the friend's first charge has stuck - paid, past the 3-day
 # refund window, not refunded, not cancelled - the referrer
@@ -3610,6 +3623,11 @@ REF_CREDIT_CENTS = {"Monthly": 2000, "Quarterly": 1500,
                     "Yearly": 1250, "Indicators Only": 1000,
                     "Lifetime": 2000}
 REF_GOOD = ("active", "trialing", "past_due", "lifetime")
+# The friend discount rides a promotion code on the referral
+# coupon (this Stripe API version rejects a discounts array on
+# payment-link creation; a prefilled promo code on the link URL
+# applies the same coupon automatically at checkout).
+REF_PROMO_CODE = "REF10"
 _REF_LINK_CACHE = {"url": None, "ts": 0}
 
 
