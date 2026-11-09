@@ -153,8 +153,10 @@ def render(d, png_path):
 
     # header row
     rect(0, 0, PANEL)
-    text(0, 0, "Strike", color=WHITE, weight=700, dx=0.08)
-    # left-align strike header: use ha left via separate call
+    # left-aligned like the strike numbers below - centering it in the
+    # narrow label column clipped the S at the figure edge
+    ax.text(tx0 + 0.04 * lab_w, ty1 - 0.5 * chgt, "Strike", color=WHITE,
+            fontsize=8.5, weight=700, va="center", ha="left")
     for j, e in enumerate(expiries):
         rect(j + 1, 0, PANEL)
         text(j + 1, 0, f"{e['label']}\n{e['dte']}d", color=GRAY, size=8)
@@ -291,7 +293,7 @@ def render(d, png_path):
         "Green = positive (call) gamma exposure  \u00b7  "
         "Red = negative (put) gamma exposure  \u00b7  "
         "Blue = bullish level  \u00b7  Yellow = bearish level  \u00b7  "
-        "Top 18 strikes by gamma shown  \u00b7  "
+        f"Top {len(strikes)} strikes by gamma shown  \u00b7  "
         "White strike label: the current price",
     ]
     if _leg2:
