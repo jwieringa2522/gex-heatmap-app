@@ -74,30 +74,47 @@ def _heaviest(cands, totals, cells, spot, want):
     return best
 
 
-def _pick_expiry(row, expiries, side):
-    """Index of the expiry cell the play card points at in one row.
+def _pick_pile(d, side):
+    """The single pile the MAP POINTS TO card points at.
 
-    The row's biggest cell on the play's side (most negative for puts,
-    most positive for calls). A cell expiring today (0 DTE) is passed
-    over when the row holds any later cell - a pile that vanishes at
-    the close is not pointed at as the trade while a live one exists.
-    Returns (index, skipped_today_index_or_None).
+    The card points at one strike in one expiry, so the pick is made
+    INSIDE expiries (Justin's tightened rule, Nov 13, 2026, after the
+    IREN card crowned $15 on its all-expiry total while its Nov 20
+    cell was half the $17 and $16 cells in the same column): among
+    the strikes shown on the map, on the play's side of the price,
+    in expiries with time left (0 DTE skipped - the facts line
+    discloses the skipped pile), the biggest single cell wins. Size
+    ties at printed precision break by closest to the price, then
+    soonest expiry. Strike totals across expiries are context only -
+    they never crown this pick. Falls back to 0 DTE cells only when
+    no later cell exists on that side of the map.
+    Returns (strike, expiry_index) or None.
     """
-    if not row:
-        return None, None
-    if side == "puts":
-        extreme = min(range(len(row)), key=lambda j: row[j])
-    else:
-        extreme = max(range(len(row)), key=lambda j: row[j])
-    if expiries[extreme]["dte"] == 0:
-        later = [j for j in range(len(row)) if expiries[j]["dte"] >= 1]
-        if later:
-            if side == "puts":
-                pick = min(later, key=lambda j: row[j])
-            else:
-                pick = max(later, key=lambda j: row[j])
-            return pick, extreme
-    return extreme, None
+    spot = d["spot"]
+    expiries = d["expiries"]
+    shown = set(d["strikes"])
+
+    def scan(min_dte):
+        best, best_key = None, None
+        for s in shown:
+            if side == "puts" and not s < spot:
+                continue
+            if side == "calls" and not s > spot:
+                continue
+            for j, v in enumerate(d["cells_all"][s]):
+                if expiries[j]["dte"] < min_dte:
+                    continue
+                if side == "puts" and v >= 0:
+                    continue
+                if side == "calls" and v <= 0:
+                    continue
+                key = (abs(_print_bucket(v)), -abs(s - spot),
+                       -expiries[j]["dte"])
+                if best_key is None or key > best_key:
+                    best, best_key = (s, j), key
+        return best
+
+    return scan(1) or scan(0)
 
 
 def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
@@ -450,22 +467,16 @@ def verdict(d):
               "NEUTRAL": "neither side is in control"}[lean]
 
     suggestion = None
-    if lean == "BEARISH" and d["bear_strike"] in strikes:
-        bj, _skipped = _pick_expiry(d["cells_all"][d["bear_strike"]],
-                                    expiries, "puts")
-        suggestion = {"side": "puts",
-                      "strike": f"${d['bear_strike']:g}",
-                      "expiry": expiries[bj]["label"],
-                      "text": (f"${d['bear_strike']:g} puts expiring "
-                               f"{expiries[bj]['label']}")}
-    elif lean == "BULLISH" and d["bull_strike"] in strikes:
-        bj, _skipped = _pick_expiry(d["cells_all"][d["bull_strike"]],
-                                    expiries, "calls")
-        suggestion = {"side": "calls",
-                      "strike": f"${d['bull_strike']:g}",
-                      "expiry": expiries[bj]["label"],
-                      "text": (f"${d['bull_strike']:g} calls expiring "
-                               f"{expiries[bj]['label']}")}
+    if lean in ("BEARISH", "BULLISH"):
+        side = "puts" if lean == "BEARISH" else "calls"
+        pick = _pick_pile(d, side)
+        if pick is not None:
+            ps, pj = pick
+            suggestion = {"side": side,
+                          "strike": f"${ps:g}",
+                          "expiry": expiries[pj]["label"],
+                          "text": (f"${ps:g} {side} expiring "
+                                   f"{expiries[pj]['label']}")}
 
     return {"lean": lean,
             "headline": f"{ticker} looks {lean} right now",
@@ -795,7 +806,8 @@ def page_extras(d):
         cell_v = wrow[ei] if ei is not None else 0
         if s["side"] == "calls":
             seeing = (f"What you are seeing: the heaviest call pile "
-                      f"above the price sits at this strike, and "
+                      f"above the price in the {s['expiry']} expiry "
+                      f"sits at this strike, and "
                       f"{share:.0%} of that strike's gamma lands in "
                       f"this one expiry - {_fmt_cell(cell_v)} in a "
                       f"single cell of the map. One strike, one date: "
@@ -807,7 +819,8 @@ def page_extras(d):
                     f"and dies with this pile")
         else:
             seeing = (f"What you are seeing: the heaviest put pile "
-                      f"below the price sits at this strike, and "
+                      f"below the price in the {s['expiry']} expiry "
+                      f"sits at this strike, and "
                       f"{share:.0%} of that strike's gamma lands in "
                       f"this one expiry - {_fmt_cell(cell_v)} in a "
                       f"single cell of the map. One strike, one date: "
@@ -876,15 +889,43 @@ def _check_extras(d, extras):
     s = vd.get("suggestion")
     if s and play:
         side = s["side"]
-        want = d["bear_strike"] if side == "puts" else d["bull_strike"]
         snum = float(str(s["strike"]).replace("$", ""))
-        if want is None or snum != want:
-            errs.append("play strike is not the heaviest pile on its "
-                        "side of the price")
+
+        def _brute_pick(min_dte):
+            best, best_key = None, None
+            for s2 in d["strikes"]:
+                if side == "puts" and not s2 < d["spot"]:
+                    continue
+                if side == "calls" and not s2 > d["spot"]:
+                    continue
+                for j2, v2 in enumerate(cells[s2]):
+                    e2 = d["expiries"][j2]
+                    if e2["dte"] < min_dte:
+                        continue
+                    if side == "puts" and v2 >= 0:
+                        continue
+                    if side == "calls" and v2 <= 0:
+                        continue
+                    a2 = abs(v2)
+                    step2 = (1e7 if a2 >= 1e9 else 1e5 if a2 >= 1e6
+                             else 100.0 if a2 >= 1e3 else 1.0)
+                    key = (round(a2 / step2) * step2,
+                           -abs(s2 - d["spot"]), -e2["dte"])
+                    if best_key is None or key > best_key:
+                        best, best_key = (s2, j2), key
+            return best
+
+        expected = _brute_pick(1) or _brute_pick(0)
+        if expected is None:
+            errs.append("play suggestion exists but the grid has no "
+                        "pile to pick")
         else:
-            bj, _sk = _pick_expiry(cells[snum], d["expiries"], side)
+            bj = expected[1]
+            if snum != expected[0]:
+                errs.append("play strike is not the heaviest "
+                            "in-expiry pile on its side of the price")
             if d["expiries"][bj]["label"] != s["expiry"]:
-                errs.append("play expiry is not the picked expiry cell")
+                errs.append("play expiry is not the picked expiry")
             row_abs = d["abs_totals_all"][snum]
             share_all = row_abs / grid_abs if grid_abs else 0
             if f"about {share_all:.0%} of all the gamma" not in play["facts"]:
