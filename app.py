@@ -2639,7 +2639,7 @@ def _welcome_compose(sub: dict) -> tuple[str, str]:
     from welcome_email.py, wording unchanged)."""
     plan = sub.get("plan") or "Membership"
     status = sub.get("status") or ""
-    trial = ("\nYour 7-day free trial has started. Your card is only "
+    trial = ("\nYour 3-day free trial has started. Your card is only "
              "charged if you stay past the trial. The free trial is "
              "one per person, ever."
              if status == "trialing" else "")
@@ -3070,7 +3070,7 @@ def _stripe_mark_welcomed(sub_id, ts) -> bool:
 
 
 # ---------- one free trial / one refund per person, ever ----------
-# Locked policy (Justin's order, Nov 2 2026): the 7-day Monthly trial
+# Locked policy (Justin's order, Nov 2 2026): the 3-day Monthly trial (7 days until Nov 13 2026)
 # is one per person, ever, and a refund is one per person, ever
 # (first purchase, inside 3 days; renewals and Lifetime final).
 #
@@ -4285,7 +4285,7 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
 - Plans (USD): Monthly $20/month, Quarterly $45/quarter, Yearly $150/year,
   Lifetime $500 one payment, Indicators Only $10/month.
-- Monthly starts with a 7-day free trial. A card is required for
+- Monthly starts with a 3-day free trial. A card is required for
   the trial. The trial is one per person, ever - if you have had a
   free trial before, a new Monthly signup is charged right away,
   with no trial.
@@ -4386,7 +4386,7 @@ _FALLBACK_ANSWER = ("I do not have a solid answer for that one. Email "
 _PLANS_ANSWER = ("Plans (all USD): Monthly $20/month, Quarterly "
                  "$45/quarter, Yearly $150/year, Lifetime $500 one "
                  "payment, and Indicators Only $10/month.\n"
-                 "Monthly starts with a 7-day free trial (card required, "
+                 "Monthly starts with a 3-day free trial (card required, "
                  "one per person, ever). Every full plan carries the same core "
                  "membership - Yearly and Lifetime also add GEX Heatmaps "
                  "PRO. Indicators Only is just the TradingView "
@@ -4486,7 +4486,7 @@ def _scripted_answer(q: str) -> str | None:
                 "window.")
     if is_trial and is_cancel and is_refund:
         return ("Good question - the trial changes it. If you "
-                "cancel during the 7-day free trial, you are never "
+                "cancel during the 3-day free trial, you are never "
                 "charged, so there is nothing to refund. The refund "
                 "window starts when the trial ends and the first "
                 "charge lands: from that day you have 3 days to ask "
@@ -4497,7 +4497,7 @@ def _scripted_answer(q: str) -> str | None:
                 f"the window, email {SUPPORT_EMAIL}.")
     if is_trial and is_cancel and has(
             "charge", "charged", "pay", "billed", "bill"):
-        return ("No - cancelling during the 7-day free trial means "
+        return ("No - cancelling during the 3-day free trial means "
                 "you are never charged at all. Your access runs to "
                 "the end of the trial, and that is the end of it: "
                 "no charge, and nothing to refund. The card is only "
@@ -4528,7 +4528,7 @@ def _scripted_answer(q: str) -> str | None:
                 "already had a refund, a later purchase is final - "
                 "there is no second refund, even inside 3 days. "
                 "That is what the free trial is for: Monthly gives "
-                "you 7 days to try everything before any charge.")
+                "you 3 days to try everything before any charge.")
     if is_refund and phrase("how long"):
         return ("Refunds are handled by email - write to "
                 f"{SUPPORT_EMAIL} with the email you subscribed "
@@ -4540,10 +4540,10 @@ def _scripted_answer(q: str) -> str | None:
                 "per person, ever. Ask within 3 days of the "
                 "charge and it is refunded in full. After that window, "
                 "renewals and Lifetime are final. Monthly also starts "
-                "with a 7-day free trial, so you can try everything "
+                "with a 3-day free trial, so you can try everything "
                 "before ever being charged.")
     if has("trial") or phrase("free week", "try it free", "try free"):
-        return ("Monthly starts with a 7-day free trial - card "
+        return ("Monthly starts with a 3-day free trial - card "
                 "required, one trial per person, ever. If you have "
                 "already had a free trial, a new Monthly signup is "
                 "charged right away instead. You get everything in "
@@ -4605,7 +4605,7 @@ def _scripted_answer(q: str) -> str | None:
             "stripe", "payment") or phrase("credit card", "debit card"):
         return ("Checkout is handled securely by Stripe - your card "
                 "details never touch this site. Monthly starts with a "
-                "7-day free trial, card required, one per person, "
+                "3-day free trial, card required, one per person, "
                 "ever. The other plans are charged at checkout and "
                 "renew automatically until you cancel.")
     # ---- TradingView guide flows ----
@@ -4766,7 +4766,7 @@ def _scripted_answer(q: str) -> str | None:
            "membership") and has("get", "access", "after", "how",
                                  "want", "start"):
         return ("Pick a plan on the site and check out - Monthly "
-                "starts with a 7-day free trial (one per person, "
+                "starts with a 3-day free trial (one per person, "
                 "ever). After checkout you "
                 "accept a short disclaimer and get your personal "
                 "Telegram invite, and you enter your TradingView "
