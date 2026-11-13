@@ -34,6 +34,72 @@ MAX_ROWS = 18        # fills the 16:9 frame
 N_EXPIRIES = 15
 
 
+def _print_bucket(v):
+    """v rounded to the precision _fmt_cell prints it at, in dollars.
+
+    Two totals that print the same on the grid ($3.5M and $3.5M) land
+    in the same bucket; the bucket stays in dollars so buckets compare
+    correctly across magnitudes ($650K never outranks $200M).
+    """
+    a = abs(v)
+    if a >= 1e9:
+        step = 1e7
+    elif a >= 1e6:
+        step = 1e5
+    elif a >= 1e3:
+        step = 100.0
+    else:
+        step = 1.0
+    return round(v / step) * step
+
+
+def _heaviest(cands, totals, cells, spot, want):
+    """The strike the narrative may call the heaviest of a group.
+
+    The selection rule IS the rule the cards state (Justin's order,
+    Nov 13, 2026, after the IREN card crowned a $15 pile over an equal
+    $17 pile): heaviest by strike total, where totals that print the
+    same on the grid count as tied; ties break by the strike's largest
+    single cell, then by closest to the price. want='min' picks the
+    most negative total, want='max' the most positive.
+    """
+    best, best_key = None, None
+    for s in cands:
+        bucket = _print_bucket(totals[s])
+        primary = bucket if want == "max" else -bucket
+        big_cell = max((abs(v) for v in cells[s]), default=0.0)
+        key = (primary, big_cell, -abs(s - spot))
+        if best_key is None or key > best_key:
+            best, best_key = s, key
+    return best
+
+
+def _pick_expiry(row, expiries, side):
+    """Index of the expiry cell the play card points at in one row.
+
+    The row's biggest cell on the play's side (most negative for puts,
+    most positive for calls). A cell expiring today (0 DTE) is passed
+    over when the row holds any later cell - a pile that vanishes at
+    the close is not pointed at as the trade while a live one exists.
+    Returns (index, skipped_today_index_or_None).
+    """
+    if not row:
+        return None, None
+    if side == "puts":
+        extreme = min(range(len(row)), key=lambda j: row[j])
+    else:
+        extreme = max(range(len(row)), key=lambda j: row[j])
+    if expiries[extreme]["dte"] == 0:
+        later = [j for j in range(len(row)) if expiries[j]["dte"] >= 1]
+        if later:
+            if side == "puts":
+                pick = min(later, key=lambda j: row[j])
+            else:
+                pick = max(later, key=lambda j: row[j])
+            return pick, extreme
+    return extreme, None
+
+
 def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
                  ref_date: date = None, max_rows: int = MAX_ROWS):
     """Per-(strike, expiry) net GEX matrix. Returns dict or raises RuntimeError."""
@@ -75,25 +141,29 @@ def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
         raise RuntimeError(f"no strikes with GEX for {ticker}")
     totals_all = {s: sum(per_exp[ed].get(s, 0.0) for ed in expiries)
                   for s in in_band}
+    cells_all = {s: [per_exp[ed].get(s, 0.0) for ed in expiries]
+                 for s in in_band}
 
     # The walls: the biggest positive / negative per-strike piles
-    # anywhere in the band. Computed here so the wall strikes can be
+    # anywhere in the band, picked by the stated rule (_heaviest:
+    # totals, printed ties broken by largest single cell, then
+    # closest to price). Computed here so the wall strikes can be
     # force-included in the displayed strikes below - the standout
     # cells live inside the wall rows, so the walls must always be
     # on the map.
-    call_wall = max(((s, totals_all[s]) for s in in_band
-                     if totals_all[s] > 0),
-                    key=lambda x: x[1], default=(None, 0.0))
-    put_wall = min(((s, totals_all[s]) for s in in_band
-                    if totals_all[s] < 0),
-                   key=lambda x: x[1], default=(None, 0.0))
+    _cw = _heaviest([s for s in in_band if totals_all[s] > 0],
+                    totals_all, cells_all, spot, "max")
+    _pw = _heaviest([s for s in in_band if totals_all[s] < 0],
+                    totals_all, cells_all, spot, "min")
+    call_wall = (_cw, totals_all[_cw]) if _cw is not None else (None, 0.0)
+    put_wall = (_pw, totals_all[_pw]) if _pw is not None else (None, 0.0)
 
     # The "interesting" strikes: heaviest above spot (bullish, blue) and
-    # heaviest below spot (bearish, yellow).
+    # heaviest below spot (bearish, yellow) - same stated rule.
     above = [s for s in in_band if s > spot]
     below = [s for s in in_band if s < spot]
-    bull_strike = max(above, key=lambda s: totals_all[s], default=None)
-    bear_strike = min(below, key=lambda s: totals_all[s], default=None)
+    bull_strike = _heaviest(above, totals_all, cells_all, spot, "max")
+    bear_strike = _heaviest(below, totals_all, cells_all, spot, "min")
 
     # The "important strikes": the strike nearest spot plus the heaviest
     # GEX strikes by absolute total. Bull/bear strikes always included.
@@ -117,6 +187,14 @@ def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
                 tot_call += v
             else:
                 tot_put += v
+    # Canonical absolute-gamma base for every "% of all the gamma on
+    # the map" claim in the narrative (Justin's order, Nov 13, 2026):
+    # total absolute gamma = call GEX + |put GEX| over the whole grid,
+    # never one side alone and never just the displayed rows' nets.
+    abs_totals_all = {s: sum(abs(v) for v in cells_all[s]) for s in in_band}
+    exp_abs = [sum(abs(per_exp[ed].get(s, 0.0)) for s in in_band)
+               for ed in expiries]
+    total_abs_gamma = tot_call + abs(tot_put)
     # biggest single strike x expiry concentration
     big = (None, None, 0.0)
     for ed in expiries:
@@ -151,7 +229,7 @@ def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
     if _crossings:
         gamma_flip = min(_crossings, key=lambda x: abs(x - spot))
 
-    return {
+    d = {
         "ticker": ticker.upper(),
         "spot": spot,
         "as_of": as_of,
@@ -170,7 +248,79 @@ def heatmap_data(ticker: str, max_dte: int = 120, n_expiries: int = N_EXPIRIES,
         "bear_strike": bear_strike,
         "biggest_cell": {"strike": big[0], "expiry": big[1], "value": big[2]},
         "gamma_flip": gamma_flip,
+        "totals_all": totals_all,
+        "cells_all": cells_all,
+        "abs_totals_all": abs_totals_all,
+        "exp_abs": exp_abs,
+        "total_abs_gamma": total_abs_gamma,
     }
+    _assert_consistency(d)
+    return d
+
+
+def _assert_consistency(d):
+    """Grid-consistency guard (Justin's order, Nov 13, 2026).
+
+    Every superlative the narrative layer can print - the walls, the
+    heaviest pile above/below the price, the biggest single pile the
+    map footer names - is recomputed here by brute force from the
+    full grid, independently of the selection code above. Any
+    divergence raises, so a map whose words contradict its grid fails
+    loudly instead of shipping. Runs on every heatmap build.
+    """
+    totals, cells, spot = d["totals_all"], d["cells_all"], d["spot"]
+    errs = []
+    exp_dates = [e["date"] for e in d["expiries"]]
+    # absolute-gamma base: stats-strip totals vs the raw grid
+    grid_abs = sum(abs(v) for row in cells.values() for v in row)
+    if abs(grid_abs - d["total_abs_gamma"]) > max(1.0, grid_abs * 1e-9):
+        errs.append("total_abs_gamma disagrees with the grid")
+    if abs(sum(d["exp_abs"]) - grid_abs) > max(1.0, grid_abs * 1e-9):
+        errs.append("exp_abs disagrees with the grid")
+    for s in totals:
+        if abs(sum(cells[s]) - totals[s]) > max(1.0, abs(totals[s]) * 1e-9):
+            errs.append(f"strike total mismatch at {s}")
+            break
+    # walls and above/below picks, re-derived straight from the rule
+    def _brute(cands, want):
+        best, best_key = None, None
+        for s in cands:
+            t = totals[s]
+            a = abs(t)
+            step = (1e7 if a >= 1e9 else 1e5 if a >= 1e6
+                    else 100.0 if a >= 1e3 else 1.0)
+            bucket = round(t / step) * step
+            primary = bucket if want == "max" else -bucket
+            key = (primary, max((abs(v) for v in cells[s]), default=0.0),
+                   -abs(s - spot))
+            if best_key is None or key > best_key:
+                best, best_key = s, key
+        return best
+    cw = _brute([s for s in totals if totals[s] > 0], "max")
+    pw = _brute([s for s in totals if totals[s] < 0], "min")
+    if cw != d["call_wall"][0]:
+        errs.append(f"call wall {d['call_wall'][0]} != recomputed {cw}")
+    if pw != d["put_wall"][0]:
+        errs.append(f"put wall {d['put_wall'][0]} != recomputed {pw}")
+    bull = _brute([s for s in totals if s > spot], "max")
+    bear = _brute([s for s in totals if s < spot], "min")
+    if bull != d["bull_strike"]:
+        errs.append(f"bull strike {d['bull_strike']} != recomputed {bull}")
+    if bear != d["bear_strike"]:
+        errs.append(f"bear strike {d['bear_strike']} != recomputed {bear}")
+    # biggest single pile (the map footer's claim): magnitude must match
+    big_abs = max((abs(v) for row in cells.values() for v in row),
+                  default=0.0)
+    if abs(abs(d["biggest_cell"]["value"]) - big_abs) > max(
+            1.0, big_abs * 1e-9):
+        errs.append("biggest_cell disagrees with the grid")
+    elif d["biggest_cell"]["strike"] is not None:
+        bi = exp_dates.index(d["biggest_cell"]["expiry"])
+        if cells[d["biggest_cell"]["strike"]][bi] != d["biggest_cell"]["value"]:
+            errs.append("biggest_cell points at the wrong cell")
+    if errs:
+        raise RuntimeError("gex narrative consistency check failed: "
+                           + "; ".join(errs))
 
 
 def _fmt_cell(v):
@@ -301,16 +451,16 @@ def verdict(d):
 
     suggestion = None
     if lean == "BEARISH" and d["bear_strike"] in strikes:
-        bi = strikes.index(d["bear_strike"])
-        bj = min(range(len(expiries)), key=lambda j: matrix[bi][j])
+        bj, _skipped = _pick_expiry(d["cells_all"][d["bear_strike"]],
+                                    expiries, "puts")
         suggestion = {"side": "puts",
                       "strike": f"${d['bear_strike']:g}",
                       "expiry": expiries[bj]["label"],
                       "text": (f"${d['bear_strike']:g} puts expiring "
                                f"{expiries[bj]['label']}")}
     elif lean == "BULLISH" and d["bull_strike"] in strikes:
-        bi = strikes.index(d["bull_strike"])
-        bj = max(range(len(expiries)), key=lambda j: matrix[bi][j])
+        bj, _skipped = _pick_expiry(d["cells_all"][d["bull_strike"]],
+                                    expiries, "calls")
         suggestion = {"side": "calls",
                       "strike": f"${d['bull_strike']:g}",
                       "expiry": expiries[bj]["label"],
@@ -528,11 +678,14 @@ def page_extras(d):
     if not walls:
         pts.append("Positioning is scattered - no wall to break or "
                    "bounce off, so there is no clean level to watch")
-    cols = d.get("col_totals") or []
+    cols = d.get("exp_abs") or []
     if cols:
-        tot_abs = sum(abs(c) for c in cols)
-        bi = max(range(len(cols)), key=lambda j: abs(cols[j]))
-        share = abs(cols[bi]) / tot_abs if tot_abs else 0
+        # Share of ALL the gamma on the map: this expiry's absolute
+        # gamma over the grid's total absolute gamma - the same base
+        # every other percentage in the narrative uses.
+        tot_abs = d.get("total_abs_gamma") or 0
+        bi = max(range(len(cols)), key=lambda j: cols[j])
+        share = cols[bi] / tot_abs if tot_abs else 0
         be = d["expiries"][bi]
         if share > 0.5:
             pts.append(f"One date drives this read: the {be['label']} "
@@ -560,10 +713,10 @@ def page_extras(d):
         opp_v = cw_v if s["side"] == "puts" else pw_v
         opp_s = cw_s if s["side"] == "puts" else pw_s
         snum = float(str(s["strike"]).replace("$", ""))
-        wi = min(range(len(d["strikes"])),
-                 key=lambda i: abs(d["strikes"][i] - snum))
-        wrow = d["matrix"][wi]
-        row_abs = sum(abs(v) for v in wrow)
+        wrow = d["cells_all"][snum]
+        # This strike's absolute gamma over the full grid (the same
+        # numbers the grid prints - not just the displayed rows).
+        row_abs = d["abs_totals_all"][snum]
         ei = next((j for j, e in enumerate(d["expiries"])
                    if e["label"] == s["expiry"]), None)
         share = (abs(wrow[ei]) / row_abs) if (ei is not None and row_abs) else 0
@@ -572,7 +725,11 @@ def page_extras(d):
         # Facts line owns this strike's weight in the whole map. (A
         # distance line here repeated card 2 word for word whenever
         # the play strike is a wall - which is most of the time.)
-        map_abs = sum(abs(t) for t in d["totals"]) or 0
+        # The share is measured against total absolute gamma - call
+        # GEX + |put GEX| over the whole grid (Nov 13 fix: it used to
+        # be measured against displayed net totals, which flattered
+        # the number and contradicted the stats strip).
+        map_abs = d["total_abs_gamma"] or 0
         share_all = row_abs / map_abs if map_abs else 0
         wall_s2 = cw_s if s["side"] == "calls" else pw_s
         facts = (f"This one strike holds about {share_all:.0%} of "
@@ -594,8 +751,29 @@ def page_extras(d):
             facts += (f" - the {wall_word} wall itself is at "
                       f"${wall_s2:g}, {where}, so this is the next "
                       f"big pile {nxt} it")
+        # 0DTE disclosure (Justin's order, Nov 13, 2026): if the
+        # biggest pile on this play's side of the map expires today
+        # and the card is pointing somewhere else, say so plainly -
+        # never silently crown a smaller pile over it.
+        _side_cells = [(v, s2, e2) for s2, row2 in d["cells_all"].items()
+                       for v, e2 in zip(row2, d["expiries"])
+                       if (v < 0 if s["side"] == "puts" else v > 0)]
+        if _side_cells:
+            _bv, _bs, _be = (min(_side_cells, key=lambda t: t[0])
+                             if s["side"] == "puts"
+                             else max(_side_cells, key=lambda t: t[0]))
+            if (_be["dte"] == 0
+                    and not (_bs == snum and _be["label"] == s["expiry"])):
+                facts += (f". The biggest {noun} pile on the map "
+                          f"({_fmt_cell(_bv)} at ${_bs:g}) expires "
+                          f"today, so this is the next pile with "
+                          f"time left.")
         if dte is None:
             decay = None
+        elif dte == 0:
+            decay = ("It expires today - time decay is at its "
+                     "fastest, and this pile is gone after the "
+                     "close.")
         elif dte <= 7:
             decay = (f"Only {dte} day{'s' if dte != 1 else ''} to "
                      f"expiry - time decay is brutal this close. The "
@@ -647,7 +825,99 @@ def page_extras(d):
             "facts": facts, "points": points,
         }
 
-    return {"verdict": vd, "tiles": tiles, "cards": cards, "play": play}
+    extras = {"verdict": vd, "tiles": tiles, "cards": cards, "play": play}
+    _check_extras(d, extras)
+    return extras
+
+
+def _check_extras(d, extras):
+    """Text-level consistency check (Justin's order, Nov 13, 2026).
+
+    Recomputes every figure and superlative the finished narrative
+    actually prints - wall totals and the magnet ratio in card 1, the
+    one-expiry share in card 3, the play strike/expiry, both play
+    percentages and the 0DTE disclosure - from the grid, and raises
+    rather than letting a contradicting page render.
+    """
+    errs = []
+    vd = extras["verdict"]
+    cards = {c["title"]: c for c in extras["cards"]}
+    totals, cells = d["totals_all"], d["cells_all"]
+    grid_abs = d["total_abs_gamma"] or 0
+
+    # Card 1: the wall figures printed must be the grid's wall totals,
+    # and the magnet ratio the grid's ratio.
+    c1 = " ".join(cards.get("FIND THE WALLS", {}).get("points", []))
+    for wall in (d["call_wall"], d["put_wall"]):
+        if wall[0] is not None and _fmt_cell(wall[1]) not in c1:
+            errs.append(f"card 1 missing wall total {_fmt_cell(wall[1])}")
+    pw_v, cw_v = d["put_wall"][1], d["call_wall"][1]
+    if d["put_wall"][0] is not None and d["call_wall"][0] is not None:
+        hi, lo = max(abs(pw_v), abs(cw_v)), min(abs(pw_v), abs(cw_v))
+        if lo and hi / lo >= 1.5:
+            if f"about {int(round(hi / lo))}x heavier" not in c1:
+                errs.append("card 1 magnet ratio disagrees with the grid")
+
+    # Card 3: a one-expiry share claim must equal the recomputed one.
+    c3 = " ".join(cards.get("WHAT TO WATCH", {}).get("points", []))
+    if d["exp_abs"] and grid_abs:
+        bi = max(range(len(d["exp_abs"])), key=lambda j: d["exp_abs"][j])
+        share = d["exp_abs"][bi] / grid_abs
+        if share > 0.5:
+            if (f"{share:.0%}" not in c3
+                    or d["expiries"][bi]["label"] not in c3):
+                errs.append("card 3 expiry share disagrees with the grid")
+        elif "of all the gamma on the map" in c3:
+            errs.append("card 3 prints an expiry share the grid "
+                        "does not support")
+
+    # The play: strike, expiry and percentages recomputed end to end.
+    play = extras.get("play")
+    s = vd.get("suggestion")
+    if s and play:
+        side = s["side"]
+        want = d["bear_strike"] if side == "puts" else d["bull_strike"]
+        snum = float(str(s["strike"]).replace("$", ""))
+        if want is None or snum != want:
+            errs.append("play strike is not the heaviest pile on its "
+                        "side of the price")
+        else:
+            bj, _sk = _pick_expiry(cells[snum], d["expiries"], side)
+            if d["expiries"][bj]["label"] != s["expiry"]:
+                errs.append("play expiry is not the picked expiry cell")
+            row_abs = d["abs_totals_all"][snum]
+            share_all = row_abs / grid_abs if grid_abs else 0
+            if f"about {share_all:.0%} of all the gamma" not in play["facts"]:
+                errs.append("play map share disagrees with the grid")
+            cell_share = (abs(cells[snum][bj]) / row_abs
+                          if row_abs else 0)
+            seeing = play["points"][0] if play["points"] else ""
+            if f"{cell_share:.0%} of that strike's gamma" not in seeing:
+                errs.append("play expiry share disagrees with the grid")
+            if _fmt_cell(cells[snum][bj]) not in seeing:
+                errs.append("play cell figure disagrees with the grid")
+            # 0DTE disclosure must be present exactly when the grid
+            # says a bigger same-side pile expires today elsewhere.
+            side_cells = [(v, s2, e2)
+                          for s2, row2 in cells.items()
+                          for v, e2 in zip(row2, d["expiries"])
+                          if (v < 0 if side == "puts" else v > 0)]
+            if side_cells:
+                bv, bs, be = (min(side_cells, key=lambda t: t[0])
+                              if side == "puts"
+                              else max(side_cells, key=lambda t: t[0]))
+                should = (be["dte"] == 0 and not
+                          (bs == snum and be["label"] == s["expiry"]))
+                has = "expires today, so this is the next pile" \
+                    in play["facts"]
+                if should != has:
+                    errs.append("0DTE disclosure out of sync with "
+                                "the grid")
+    elif bool(s) != bool(play):
+        errs.append("play card and suggestion disagree")
+    if errs:
+        raise RuntimeError("gex narrative consistency check failed: "
+                           + "; ".join(errs))
 
 
 def render_html(d):
