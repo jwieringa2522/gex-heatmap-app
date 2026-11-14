@@ -1688,6 +1688,204 @@ def stripe_referral_setup(key: str = ""):
             status_code=502)
 
 
+# ---------- recurring random promos (Justin's program, Nov 13 2026) ----------
+# Every other week, one promo: 10% or 15% off the FIRST payment on
+# Monthly, Quarterly and Yearly (duration=once coupons restricted to
+# those plans' products). Lifetime and Indicators Only are excluded;
+# the referral REF10 path is separate and untouched. Stripe itself is
+# the state store (promotion code active flag + expires_at backstop),
+# so a redeploy cannot resurrect or lose a promo. The site banner
+# reads the public GET /promo/state; the site-promo-machine cron
+# flips codes through the keyed endpoints below.
+PROMO_CODES = {10: "SAVE10", 15: "SAVE15"}
+PROMO_PLANS = {
+    "monthly": {
+        "link_id": "plink_1UWiKEAK6giYlerxHKeQ984B",
+        "price_id": "price_1UWiGQAK6giYlerxdra2TD2c",
+        "url": "https://buy.stripe.com/00wdR86YK3Qn9nWaxBcs800"},
+    "quarterly": {
+        "link_id": "plink_1UWiLDAK6giYlerxmsrkVKwR",
+        "price_id": "price_1UWiGQAK6giYlerxF8hY4i74",
+        "url": "https://buy.stripe.com/9B6bJ06YK72z43C9txcs801"},
+    "yearly": {
+        "link_id": "plink_1UWiMLAK6giYlerxVA0WjXF1",
+        "price_id": "price_1UWiGQAK6giYlerxTHlDrB38",
+        "url": "https://buy.stripe.com/3cIfZg6YK0EbdEc5dhcs802"},
+}
+_PROMO_STATE_CACHE = {"data": None, "ts": 0.0}
+
+
+def _promo_find_code(code_str):
+    promos = _stripe_get("promotion_codes?limit=100").get("data") or []
+    return next((p for p in promos if p.get("code") == code_str), None)
+
+
+def _promo_state(force=False):
+    """Live promo state derived from Stripe. Cached 60 seconds.
+    A code counts as live only when it is active and unexpired."""
+    now = time.time()
+    if (not force and _PROMO_STATE_CACHE["data"] is not None
+            and now - _PROMO_STATE_CACHE["ts"] < 60):
+        return _PROMO_STATE_CACHE["data"]
+    state = {"active": False}
+    for pct, code_str in PROMO_CODES.items():
+        promo = _promo_find_code(code_str)
+        if not promo or not promo.get("active"):
+            continue
+        exp = promo.get("expires_at")
+        if exp and exp <= now:
+            continue
+        state = {"active": True, "percent": pct, "code": code_str,
+                 "ends_at": exp}
+        break
+    _PROMO_STATE_CACHE.update({"data": state, "ts": now})
+    return state
+
+
+@app.get("/promo/state")
+def promo_state():
+    """Public read for the site banner. Fail-closed: any error, or no
+    live promo, returns {"active": false} and the site shows nothing."""
+    try:
+        if not STRIPE_SECRET_KEY:
+            return {"active": False}
+        state = _promo_state()
+        if not state.get("active"):
+            return {"active": False}
+        code = state["code"]
+        return {
+            "active": True,
+            "percent": state["percent"],
+            "code": code,
+            "ends_at": state.get("ends_at"),
+            "checkout": {
+                name: f"{p['url']}?prefilled_promo_code={code}"
+                for name, p in PROMO_PLANS.items()},
+        }
+    except Exception:
+        return {"active": False}
+
+
+@app.post("/promo/setup")
+def promo_setup(key: str = ""):
+    """Keyed, idempotent: create the 10% and 15% first-payment
+    coupons (restricted to the Monthly/Quarterly/Yearly products),
+    their SAVE10/SAVE15 promotion codes (created inactive), and make
+    the three plan Payment Links accept promotion codes."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    out = {"coupons": {}, "codes": {}, "links": {}, "link_errors": {}}
+    try:
+        products = []
+        for name, p in PROMO_PLANS.items():
+            price = _stripe_get(f"prices/{p['price_id']}")
+            prod = price.get("product")
+            out.setdefault("products", {})[name] = prod
+            if prod and prod not in products:
+                products.append(prod)
+        out["product_ids"] = products
+        coupons = _stripe_get("coupons?limit=100").get("data") or []
+        for pct, code_str in PROMO_CODES.items():
+            tag = f"promo{pct}"
+            coupon = next(
+                (c for c in coupons
+                 if (c.get("metadata") or {}).get("sbyb") == tag
+                 and c.get("valid")), None)
+            if not coupon:
+                fields = {
+                    "percent_off": str(pct), "duration": "once",
+                    "name": f"Promo - {pct}% off first payment",
+                    "metadata[sbyb]": tag}
+                for i, prod in enumerate(products):
+                    fields[f"applies_to[products][{i}]"] = prod
+                coupon = _stripe_post("coupons", fields)
+            out["coupons"][str(pct)] = coupon.get("id")
+            promo = _promo_find_code(code_str)
+            if not promo:
+                promo = _stripe_post("promotion_codes", {
+                    "promotion[type]": "coupon",
+                    "promotion[coupon]": coupon.get("id"),
+                    "code": code_str, "active": "false",
+                    "metadata[sbyb]": tag})
+            out["codes"][code_str] = {
+                "id": promo.get("id"), "active": promo.get("active")}
+        for name, p in PROMO_PLANS.items():
+            try:
+                link = _stripe_get(f"payment_links/{p['link_id']}")
+                if not link.get("allow_promotion_codes"):
+                    link = _stripe_post(
+                        f"payment_links/{p['link_id']}",
+                        {"allow_promotion_codes": "true"})
+                out["links"][name] = link.get("allow_promotion_codes")
+            except Exception as e:
+                out["link_errors"][name] = str(e)[:200]
+        return out
+    except Exception as e:
+        return JSONResponse(
+            {"detail": f"promo setup failed: {e}", **out},
+            status_code=502)
+
+
+@app.post("/promo/activate")
+def promo_activate(payload: dict, key: str = ""):
+    """Keyed: switch one promo code on, with expires_at set to the
+    window end as a backstop, and the other code off."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    pct = payload.get("percent")
+    ends_at = payload.get("ends_at")
+    if pct not in PROMO_CODES or not ends_at:
+        return JSONResponse(
+            {"detail": "percent (10 or 15) and ends_at required"},
+            status_code=400)
+    try:
+        for p2, code_str in PROMO_CODES.items():
+            promo = _promo_find_code(code_str)
+            if not promo:
+                return JSONResponse(
+                    {"detail": f"promo code {code_str} missing - "
+                               f"run /promo/setup first"},
+                    status_code=409)
+            if p2 == pct:
+                _stripe_post(f"promotion_codes/{promo['id']}", {
+                    "active": "true", "expires_at": str(int(ends_at))})
+            elif promo.get("active"):
+                _stripe_post(f"promotion_codes/{promo['id']}",
+                             {"active": "false"})
+        _PROMO_STATE_CACHE.update({"data": None, "ts": 0.0})
+        return {"ok": True, "state": _promo_state(force=True)}
+    except Exception as e:
+        return JSONResponse({"detail": f"activate failed: {e}"},
+                            status_code=502)
+
+
+@app.post("/promo/deactivate")
+def promo_deactivate(key: str = ""):
+    """Keyed: switch both promo codes off."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    try:
+        for code_str in PROMO_CODES.values():
+            promo = _promo_find_code(code_str)
+            if promo and promo.get("active"):
+                _stripe_post(f"promotion_codes/{promo['id']}",
+                             {"active": "false"})
+        _PROMO_STATE_CACHE.update({"data": None, "ts": 0.0})
+        return {"ok": True, "state": _promo_state(force=True)}
+    except Exception as e:
+        return JSONResponse({"detail": f"deactivate failed: {e}"},
+                            status_code=502)
+
+
 @app.get("/tradingview", response_class=HTMLResponse)
 def tv_claim_page():
     return ACCESS_PAGE.replace("__BODY__", _TV_FORM)
@@ -4297,6 +4495,11 @@ _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
   refund; the 3-day refund window runs from the first charge,
   when the trial converts. Refunds and cancellations are only
   ever processed by email to the support address, never in chat.
+- Promos run from time to time for a few days - 10 or 15% off the
+  first payment on Monthly, Quarterly and Yearly. The banner on
+  the site shows the current one; if there is no banner, no promo
+  is on. Never state that a specific promo is live unless the
+  scripted answer layer has said so.
 - The core membership is the same on every full plan: private Telegram
   channel alerts (day, swing and options), the GEX heatmap app, the
   pre-market Gamma Brief, the daily whale scanner, custom TradingView
@@ -4542,6 +4745,32 @@ def _scripted_answer(q: str) -> str | None:
                 "renewals and Lifetime are final. Monthly also starts "
                 "with a 3-day free trial, so you can try everything "
                 "before ever being charged.")
+    if has("promo", "promotion", "discount", "coupon") or phrase(
+            "promo code", "discount code", "on sale"):
+        # Promo answers quote a live promo ONLY from Stripe state -
+        # never from the calendar or a guess.
+        try:
+            _ps = _promo_state()
+        except Exception:
+            _ps = {"active": False}
+        if _ps.get("active"):
+            _end = ""
+            if _ps.get("ends_at"):
+                from zoneinfo import ZoneInfo
+                _end = (" It ends " + datetime.fromtimestamp(
+                    _ps["ends_at"], ZoneInfo("America/Winnipeg")
+                ).strftime("%b %-d") + ".")
+            return (f"Yes - a promo is on right now: "
+                    f"{_ps['percent']}% off your first payment on "
+                    f"Monthly, Quarterly or Yearly with the code "
+                    f"{_ps['code']}.{_end} The banner on the site "
+                    f"links straight to checkout with the code "
+                    f"applied. Lifetime and Indicators Only are not "
+                    f"part of it.")
+        return ("Promos run from time to time for a few days - 10 "
+                "or 15% off the first payment on Monthly, Quarterly "
+                "and Yearly. The banner on the site shows the "
+                "current one; if there is no banner, no promo is on.")
     if has("trial") or phrase("free week", "try it free", "try free"):
         return ("Monthly starts with a 3-day free trial - card "
                 "required, one trial per person, ever. If you have "
