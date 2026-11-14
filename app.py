@@ -5246,6 +5246,36 @@ def winback_log(key: str = "", since_id: int = 0):
         for r in rows]}
 
 
+@app.get("/winback/code")
+def winback_code(key: str = "", code: str = ""):
+    """Keyed diagnostic: the live Stripe state of one win-back
+    code (active flag, real expires_at, redemptions) - for support
+    questions and reconciliations (added Nov 14 2026 for the
+    3-vs-7-day check on the first send)."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    try:
+        promos = _stripe_get(
+            "promotion_codes?limit=100").get("data") or []
+    except Exception as e:
+        return JSONResponse({"detail": f"stripe error: {e}"},
+                            status_code=502)
+    p = next((x for x in promos
+              if x.get("code") == (code or "").strip()), None)
+    if not p:
+        return JSONResponse({"detail": "code not found"},
+                            status_code=404)
+    return {"code": p.get("code"), "active": p.get("active"),
+            "expires_at": p.get("expires_at"),
+            "max_redemptions": p.get("max_redemptions"),
+            "times_redeemed": p.get("times_redeemed"),
+            "promotion": p.get("promotion"),
+            "metadata": p.get("metadata") or {}}
+
+
 # ---------- referral program: give a month, get a month ----------
 # Locked rules (Justin's order, Nov 7 2026): every paying member
 # has a personal link /ref/<code>. A friend joining Monthly
