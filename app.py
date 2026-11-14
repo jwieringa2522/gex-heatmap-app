@@ -895,6 +895,9 @@ def _subs_db():
             "ALTER TABLE site_subs ADD COLUMN ref_applied_ts REAL")
     if "ref_note" not in cols:
         con.execute("ALTER TABLE site_subs ADD COLUMN ref_note TEXT")
+    if "ref_email_sent_ts" not in cols:
+        con.execute(
+            "ALTER TABLE site_subs ADD COLUMN ref_email_sent_ts REAL")
     # One-trial / one-refund identity registry (Nov 2 2026). Local
     # mirror only - the durable stamps live on Stripe (subscription +
     # customer metadata) and this table is rebuilt from them at boot
@@ -2952,6 +2955,139 @@ def email_welcome_run(key: str = ""):
     return {"sent": sent, "skipped": skipped}
 
 
+REFERRAL_EMAIL_SUBJECT = "Your referral link"
+REF_EMAIL_STATUSES = ("active", "trialing", "lifetime")
+REF_EMAIL_TEST_SKIP = {"jgwwinnipeg@yahoo.com"}
+REF_EMAIL_DELAY_SECS = 24 * 3600
+
+
+def _referral_email_compose(sub: dict) -> tuple[str, str]:
+    """The referral follow-up email (Justin's order, Nov 13 2026):
+    one per member, about 24 hours after they join, carrying their
+    personal /ref/<code> link and the plain program explanation."""
+    code = sub.get("ref_code") or ""
+    body = f"""Hi - here is your personal referral link:
+{GATE_BASE}/ref/{code}
+
+Share it with anyone who trades. A friend who joins Monthly through your link gets their first month for $10 instead of $20.
+
+Once their first payment clears the 3-day refund window, a free month is added to your account. It comes off your next renewal automatically - you do not need to do anything.
+
+You can bank up to 12 free months.
+
+SpyBeforeYouBuy"""
+    return REFERRAL_EMAIL_SUBJECT, body
+
+
+def _stripe_ref_email_ts(sub_id):
+    """Durable referral-email marker on the Stripe subscription
+    (metadata.ref_email_sent_ts) - same pattern as welcome_sent_ts,
+    so a database wipe can never cause a second send."""
+    if not STRIPE_SECRET_KEY or not sub_id or SBYB_TEST_MODE:
+        return None
+    try:
+        sub = _stripe_get(f"subscriptions/{sub_id}")
+        raw = (sub.get("metadata") or {}).get("ref_email_sent_ts")
+        return float(raw) if raw else None
+    except Exception as e:
+        print(f"[email] ref-email check failed for {sub_id}: {e}",
+              flush=True)
+        return None
+
+
+def _stripe_mark_ref_email(sub_id, ts) -> bool:
+    if not STRIPE_SECRET_KEY or not sub_id or SBYB_TEST_MODE:
+        return False
+    try:
+        data = urllib.parse.urlencode(
+            {"metadata[ref_email_sent_ts]": str(int(ts))}).encode()
+        req = urllib.request.Request(
+            f"https://api.stripe.com/v1/subscriptions/{sub_id}",
+            data=data, method="POST")
+        req.add_header("Authorization", f"Bearer {STRIPE_SECRET_KEY}")
+        urllib.request.urlopen(req, timeout=20).read()
+        return True
+    except Exception as e:
+        print(f"[email] ref-email mark failed for {sub_id}: {e}",
+              flush=True)
+        return False
+
+
+@app.post("/email/referral-run")
+def email_referral_run(key: str = ""):
+    """Keyed: send the one-time referral-link email to every member
+    in good standing whose subscription started at least 24 hours
+    ago and who has not been sent it yet. Sent once per member,
+    ever - the durable marker is the Stripe subscription metadata,
+    mirrored in the app record."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _subs_db()
+    sent, skipped = [], []
+    preview = None
+    try:
+        rows = con.execute(
+            """SELECT email, plan, status, created_ts,
+                      ref_email_sent_ts, stripe_subscription_id
+               FROM site_subs""").fetchall()
+        now = time.time()
+        for email, plan, status, created_ts, sent_ts, sub_id in rows:
+            if status not in REF_EMAIL_STATUSES:
+                continue
+            if (email or "").strip().lower() in REF_EMAIL_TEST_SKIP:
+                skipped.append({"email": email, "reason": "tester row"})
+                continue
+            if sent_ts:
+                continue
+            if sub_id:
+                durable = _stripe_ref_email_ts(sub_id)
+                if durable:
+                    con.execute(
+                        "UPDATE site_subs SET ref_email_sent_ts=? "
+                        "WHERE email=?", (durable, email))
+                    con.commit()
+                    skipped.append(
+                        {"email": email,
+                         "reason": "already sent (Stripe record)"})
+                    continue
+            if not created_ts:
+                skipped.append({"email": email,
+                                "reason": "no start date on file"})
+                continue
+            if now - created_ts < REF_EMAIL_DELAY_SECS:
+                skipped.append({"email": email,
+                                "reason": "under 24 hours old"})
+                continue
+            code = _ref_code(email)
+            if not code or len(code) != 8:
+                skipped.append(
+                    {"email": email,
+                     "reason": "referral code could not be derived"})
+                print(f"[email] referral code not derivable for "
+                      f"{email}", flush=True)
+                continue
+            subject, body = _referral_email_compose(
+                {"ref_code": code})
+            if _resend_send(email, subject, body):
+                con.execute(
+                    "UPDATE site_subs SET ref_email_sent_ts=? "
+                    "WHERE email=?", (now, email))
+                con.commit()
+                if sub_id:
+                    _stripe_mark_ref_email(sub_id, now)
+                sent.append({"email": email, "plan": plan,
+                             "code": code})
+                if preview is None:
+                    preview = {"to": email, "subject": subject,
+                               "body": body}
+            else:
+                skipped.append({"email": email,
+                                "reason": "send failed - see app logs"})
+    finally:
+        con.close()
+    return {"sent": sent, "skipped": skipped, "preview": preview}
+
+
 @app.post("/email/mark-welcomed")
 def email_mark_welcomed(payload: dict, key: str = ""):
     """Keyed backfill: record that a subscriber has already been
@@ -3210,7 +3346,8 @@ def stripe_rebuild_from_session(payload: dict, key: str = ""):
                             status_code=500)
     cols = ("email", "plan", "status", "stripe_customer_id",
             "stripe_subscription_id", "checkout_session_id", "invite_link",
-            "current_period_end", "tv_username", "welcome_sent_ts")
+            "current_period_end", "tv_username", "welcome_sent_ts",
+            "ref_email_sent_ts")
     return dict(zip(cols, row))
 
 
@@ -3607,7 +3744,8 @@ def stripe_rebuild_from_email(payload: dict, key: str = ""):
           f"invite={'yes' if invite else 'NO'}", flush=True)
     cols = ("email", "plan", "status", "stripe_customer_id",
             "stripe_subscription_id", "checkout_session_id", "invite_link",
-            "current_period_end", "tv_username", "welcome_sent_ts")
+            "current_period_end", "tv_username", "welcome_sent_ts",
+            "ref_email_sent_ts")
     return dict(zip(cols, row))
 
 
