@@ -3088,6 +3088,23 @@ def email_referral_run(key: str = ""):
     return {"sent": sent, "skipped": skipped, "preview": preview}
 
 
+@app.post("/email/test-referral")
+def email_test_referral(payload: dict, key: str = ""):
+    """Keyed: one-off [TEST] referral email to any address - derives
+    the code from the address, ignores and does not set any marker,
+    and needs no subscriber row. For eyeballing the real render."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    email = (payload.get("email") or "").strip().lower()
+    if not email:
+        return JSONResponse({"detail": "email required"},
+                            status_code=400)
+    code = _ref_code(email)
+    subject, body = _referral_email_compose({"ref_code": code})
+    ok = _resend_send(email, "[TEST] " + subject, body)
+    return {"sent": ok, "to": email, "code": code}
+
+
 @app.post("/email/mark-welcomed")
 def email_mark_welcomed(payload: dict, key: str = ""):
     """Keyed backfill: record that a subscriber has already been
