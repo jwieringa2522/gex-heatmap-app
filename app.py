@@ -1955,7 +1955,7 @@ def stripe_subs(key: str = ""):
                current_period_end, created_ts, updated_ts, tv_username,
                welcome_sent_ts, trial_repeat, referred_by, ref_state,
                first_charge_ts, ref_bank, ref_earned, ref_earned_ts,
-               ref_applied_ts
+               ref_applied_ts, ref_email_sent_ts
                FROM site_subs""").fetchall()
         flags = {r[0]: (r[1], r[2]) for r in con.execute(
             "SELECT key, trial_used_ts, refund_used_ts "
@@ -1967,7 +1967,7 @@ def stripe_subs(key: str = ""):
             "current_period_end", "created_ts", "updated_ts", "tv_username",
             "welcome_sent_ts", "trial_repeat", "referred_by", "ref_state",
             "first_charge_ts", "ref_bank", "ref_earned", "ref_earned_ts",
-            "ref_applied_ts")
+            "ref_applied_ts", "ref_email_sent_ts")
     subs = []
     for r in rows:
         d = dict(zip(cols, r))
