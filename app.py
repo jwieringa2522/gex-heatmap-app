@@ -1991,7 +1991,8 @@ def stripe_subs(key: str = ""):
                current_period_end, created_ts, updated_ts, tv_username,
                welcome_sent_ts, trial_repeat, referred_by, ref_state,
                first_charge_ts, ref_bank, ref_earned, ref_earned_ts,
-               ref_applied_ts, ref_email_sent_ts, cancel_reason
+               ref_applied_ts, ref_email_sent_ts, cancel_reason,
+               canceled_ts, ref_note
                FROM site_subs""").fetchall()
         flags = {r[0]: (r[1], r[2], r[3]) for r in con.execute(
             "SELECT key, trial_used_ts, refund_used_ts, save_used_ts "
@@ -2003,7 +2004,8 @@ def stripe_subs(key: str = ""):
             "current_period_end", "created_ts", "updated_ts", "tv_username",
             "welcome_sent_ts", "trial_repeat", "referred_by", "ref_state",
             "first_charge_ts", "ref_bank", "ref_earned", "ref_earned_ts",
-            "ref_applied_ts", "ref_email_sent_ts", "cancel_reason")
+            "ref_applied_ts", "ref_email_sent_ts", "cancel_reason",
+            "canceled_ts", "ref_note")
     subs = []
     for r in rows:
         d = dict(zip(cols, r))
@@ -3301,7 +3303,7 @@ def stripe_restore_sub(payload: dict, key: str = ""):
     cols = ("email", "plan", "status", "stripe_customer_id",
             "stripe_subscription_id", "checkout_session_id", "invite_link",
             "current_period_end", "created_ts", "updated_ts", "tv_username",
-            "welcome_sent_ts")
+            "welcome_sent_ts", "canceled_ts", "ref_note", "cancel_reason")
     vals = [email] + [payload.get(c) for c in cols[1:]]
     con = _subs_db()
     try:
@@ -3985,7 +3987,9 @@ def _self_heal_subs():
     exist, a local 'refunded' status is never overwritten, and new
     rows get their Telegram invite minted by the usual guard.
     Lifetime one-time payments have no subscription to rebuild
-    from; those rows still rely on snapshot restore. Never raises:
+    from; those rows are restored from the VM mirror snapshot
+    (site_sync.py keeps subs_mirror.json and pushes missing rows
+    back through /stripe/restore-sub after a wipe). Never raises:
     a Stripe outage must not stop the app from booting."""
     if not STRIPE_SECRET_KEY or SBYB_TEST_MODE:
         return
