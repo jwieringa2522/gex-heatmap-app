@@ -916,6 +916,24 @@ def _subs_db():
     con.execute("""CREATE TABLE IF NOT EXISTS identity_flags(
         kind TEXT, key TEXT, trial_used_ts REAL, refund_used_ts REAL,
         source TEXT, updated_ts REAL, PRIMARY KEY(kind, key))""")
+    idf_cols = {r[1] for r in con.execute(
+        "PRAGMA table_info(identity_flags)")}
+    if "save_used_ts" not in idf_cols:
+        con.execute(
+            "ALTER TABLE identity_flags ADD COLUMN save_used_ts REAL")
+    # Cancel-save flow (Nov 14 2026): the Q1 reason rides the
+    # subscription row so the daily digest can print it; the full
+    # answers live in cancel_feedback and are pulled to the VM by
+    # site_sync. save_events is the redemption/block audit log.
+    if "cancel_reason" not in cols:
+        con.execute(
+            "ALTER TABLE site_subs ADD COLUMN cancel_reason TEXT")
+    con.execute("""CREATE TABLE IF NOT EXISTS save_events(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, email TEXT,
+        event TEXT, reason TEXT, sub_id TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS cancel_feedback(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, email TEXT,
+        sub_id TEXT, plan TEXT, q1 TEXT, q2 TEXT, q3 TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS stripe_events(
         event_id TEXT PRIMARY KEY, type TEXT, ts REAL)""")
     con.execute("""CREATE TABLE IF NOT EXISTS tv_claims(
@@ -1441,6 +1459,7 @@ def access_page(session_id: str = ""):
             "ENTER MY TRADINGVIEW USERNAME</a>"
             f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>'
             f'<div class="small">Plan: {row[1]} - {row[0]}</div>'
+            f"{_MANAGE_LINE}"
             f"{_referral_block(row[0])}"
             f"{_GUIDE_LINE}")
     elif row:
@@ -1463,10 +1482,11 @@ def access_page(session_id: str = ""):
                   if STRIPE_PORTAL_URL else "")
         body = ('<div class="big">You are in.</div>'
                 f"{personal}{_access_steps(tv_note)}{portal}"
+                f"{_MANAGE_LINE}"
                 f"{_referral_block(row[0])}")
     else:
         body = ('<div class="big">Almost there.</div>'
-                f"{_access_steps()}")
+                f"{_access_steps()}{_MANAGE_LINE}")
     return ACCESS_PAGE.replace("__BODY__", body)
 
 
@@ -1971,10 +1991,10 @@ def stripe_subs(key: str = ""):
                current_period_end, created_ts, updated_ts, tv_username,
                welcome_sent_ts, trial_repeat, referred_by, ref_state,
                first_charge_ts, ref_bank, ref_earned, ref_earned_ts,
-               ref_applied_ts, ref_email_sent_ts
+               ref_applied_ts, ref_email_sent_ts, cancel_reason
                FROM site_subs""").fetchall()
-        flags = {r[0]: (r[1], r[2]) for r in con.execute(
-            "SELECT key, trial_used_ts, refund_used_ts "
+        flags = {r[0]: (r[1], r[2], r[3]) for r in con.execute(
+            "SELECT key, trial_used_ts, refund_used_ts, save_used_ts "
             "FROM identity_flags WHERE kind='email'")}
     finally:
         con.close()
@@ -1983,7 +2003,7 @@ def stripe_subs(key: str = ""):
             "current_period_end", "created_ts", "updated_ts", "tv_username",
             "welcome_sent_ts", "trial_repeat", "referred_by", "ref_state",
             "first_charge_ts", "ref_bank", "ref_earned", "ref_earned_ts",
-            "ref_applied_ts", "ref_email_sent_ts")
+            "ref_applied_ts", "ref_email_sent_ts", "cancel_reason")
     subs = []
     for r in rows:
         d = dict(zip(cols, r))
@@ -1991,9 +2011,11 @@ def stripe_subs(key: str = ""):
         d["ref_code"] = _ref_code(d["email"])
         d["ref_bank"] = d.get("ref_bank") or 0
         d["ref_earned"] = d.get("ref_earned") or 0
-        trial_ts, refund_ts = flags.get(d["email"], (None, None))
+        trial_ts, refund_ts, save_ts = flags.get(
+            d["email"], (None, None, None))
         d["trial_used_ts"] = trial_ts
         d["refund_used_ts"] = refund_ts
+        d["save_used_ts"] = save_ts
         subs.append(d)
     return {"subs": subs}
 
@@ -3495,7 +3517,8 @@ def _flag_stamp(con, kind, key, which, ts, source):
     key. The earliest stamp wins; the source records which
     subscription earned it (repeat checks ignore a subscription's
     own stamp)."""
-    col = "trial_used_ts" if which == "trial" else "refund_used_ts"
+    col = {"trial": "trial_used_ts", "refund": "refund_used_ts",
+           "save": "save_used_ts"}[which]
     con.execute(
         f"""INSERT INTO identity_flags(kind, key, {col}, source,
                updated_ts)
@@ -3561,7 +3584,7 @@ def _stripe_card_display(customer_id):
 
 def _stripe_stamp_identity(sub_id=None, customer_id=None,
                            trial_ts=None, refund_ts=None, tv=None,
-                           card=None):
+                           card=None, save_ts=None):
     """Persist identity markers on Stripe so a database wipe cannot
     erase them. Subscription metadata first (proven write path);
     customer metadata is attempted as well and quietly skipped if
@@ -3572,6 +3595,8 @@ def _stripe_stamp_identity(sub_id=None, customer_id=None,
         fields["metadata[sbyb_trial_used_ts]"] = str(int(trial_ts))
     if refund_ts:
         fields["metadata[sbyb_refund_used_ts]"] = str(int(refund_ts))
+    if save_ts:
+        fields["metadata[sbyb_save_used_ts]"] = str(int(save_ts))
     tvn = _norm_tv(tv)
     if tvn:
         fields["metadata[sbyb_tv]"] = tvn
@@ -3838,16 +3863,18 @@ def _link_tv_key(con, email, tv):
     if not tvn:
         return
     row = con.execute(
-        "SELECT trial_used_ts, refund_used_ts, source "
+        "SELECT trial_used_ts, refund_used_ts, save_used_ts, source "
         "FROM identity_flags WHERE kind='email' AND key=?",
         (email,)).fetchone()
     if not row:
         return
-    trial_ts, refund_ts, source = row
+    trial_ts, refund_ts, save_ts, source = row
     if trial_ts:
         _flag_stamp(con, "tv", tvn, "trial", trial_ts, source)
     if refund_ts:
         _flag_stamp(con, "tv", tvn, "refund", refund_ts, source)
+    if save_ts:
+        _flag_stamp(con, "tv", tvn, "save", save_ts, source)
     customer_id, sub_id, _tv = _sub_ids(con, email)
     _stripe_stamp_identity(sub_id=sub_id, customer_id=customer_id,
                            tv=tvn)
@@ -4164,7 +4191,8 @@ def _self_heal_subs():
                                         t0, sub.get("id"))
                 for field, which in (
                         ("sbyb_trial_used_ts", "trial"),
-                        ("sbyb_refund_used_ts", "refund")):
+                        ("sbyb_refund_used_ts", "refund"),
+                        ("sbyb_save_used_ts", "save")):
                     raw = meta.get(field)
                     if raw:
                         try:
@@ -4196,6 +4224,14 @@ def _self_heal_subs():
                             (meta["sbyb_card"], email,
                              customer.get("id"), sub.get("id"),
                              now, now))
+                # Cancel reason durability: the Q1 answer stamped
+                # on Stripe at feedback time restores onto the row,
+                # so the daily digest keeps printing it after a wipe.
+                if meta.get("sbyb_cancel_reason"):
+                    con.execute(
+                        "UPDATE site_subs SET cancel_reason=? "
+                        "WHERE email=?",
+                        (meta["sbyb_cancel_reason"], email))
             con.commit()
             # Rebuild the referrals table from the restored rows:
             # every friend row carries its referrer and state, so
@@ -4243,6 +4279,591 @@ def _self_heal_subs():
               flush=True)
     except Exception as e:
         print(f"[stripe] self-heal failed: {e}", flush=True)
+
+
+# ---------- cancel-save flow (Justin's order, Nov 14 2026) ----------
+# A member who goes to cancel first gets ONE save offer: 25% off
+# their next payment, one time, on any recurring plan (Monthly /
+# Quarterly / Yearly / Indicators Only - Lifetime has no renewal to
+# discount). The discount is applied by the app directly to the
+# Stripe subscription (coupon tagged sbyb=save25) - never a public
+# promo code, never on a Payment Link, so it cannot be shared or
+# re-triggered. The one-time lock rides the identity registry: a
+# sbyb_save_used_ts stamp on Stripe metadata, mirrored into
+# identity_flags at boot, keyed on email + TradingView username +
+# card fingerprint - the same machinery as one-trial / one-refund.
+# A stamped identity is never shown or granted the offer again.
+#
+# Two entry paths:
+# - Self-serve: /access links to /manage; the member enters their
+#   subscription email and lands on the save screen first (or, if
+#   the offer is already spent, straight on the feedback screen).
+#   Declining runs a 3-question feedback form, then the cancel
+#   completes at period end.
+# - Email: the support watcher still cancels first at period end
+#   (Nov 4 rule, unchanged); its confirmation reply carries the
+#   member's personal /save/<code> link (same email-derived code as
+#   /ref/<code>). Redeeming it before the period ends undoes the
+#   pending cancel and applies the discount.
+SAVE25_TAG = "save25"
+SAVE_ELIGIBLE_STATUSES = ("active", "trialing", "past_due")
+SAVE_REASONS = ("Too expensive", "Not using it enough",
+                "Not for my trading style", "Technical trouble",
+                "Just taking a break", "Other")
+_SAVE_COUPON_CACHE = {"id": None, "ts": 0.0}
+_MANAGE_LINE = ('<div class="small"><a href="/manage">'
+                "Manage or cancel my subscription</a></div>")
+
+
+def _save_event(con, email, event, reason=None, sub_id=None):
+    con.execute(
+        "INSERT INTO save_events(ts, email, event, reason, sub_id) "
+        "VALUES(?,?,?,?,?)",
+        (time.time(), email, event, reason, sub_id))
+
+
+def _save_coupon_id():
+    """Resolve the SAVE25 coupon id from Stripe (metadata tag).
+    Cached 10 minutes; None when setup has not run."""
+    now = time.time()
+    if (_SAVE_COUPON_CACHE["id"]
+            and now - _SAVE_COUPON_CACHE["ts"] < 600):
+        return _SAVE_COUPON_CACHE["id"]
+    cid = None
+    try:
+        coupons = _stripe_get("coupons?limit=100").get("data") or []
+        c = next((c for c in coupons
+                  if (c.get("metadata") or {}).get("sbyb")
+                  == SAVE25_TAG and c.get("valid")), None)
+        cid = c.get("id") if c else None
+    except Exception as e:
+        print(f"[save] coupon lookup failed: {e}", flush=True)
+    _SAVE_COUPON_CACHE.update({"id": cid, "ts": now})
+    return cid
+
+
+def _identity_save_used(con, email, tv=None, card=None):
+    for kind, key in _identity_keys(email=email, tv=tv, card=card):
+        row = con.execute(
+            "SELECT save_used_ts FROM identity_flags "
+            "WHERE kind=? AND key=?", (kind, key)).fetchone()
+        if row and row[0]:
+            return True
+    return False
+
+
+def _stamp_save_used(con, email):
+    """Mark an identity save-used on every known key, locally and
+    on Stripe - the one-time lock for the cancel-save offer."""
+    customer_id, sub_id, tv = _sub_ids(con, email)
+    card = _stripe_card_fingerprint(customer_id)
+    keys = _identity_keys(email=email, tv=tv, card=card)
+    ts = time.time()
+    for kind, key in keys:
+        _flag_stamp(con, kind, key, "save", ts, sub_id)
+    _stripe_stamp_identity(sub_id=sub_id, customer_id=customer_id,
+                           save_ts=ts, tv=tv, card=card)
+    print(f"[save] save stamped for {email}: "
+          f"keys={[k for k, _ in keys]} sub={sub_id}", flush=True)
+
+
+def _save_row(con, email):
+    row = con.execute(
+        """SELECT email, plan, status, stripe_customer_id,
+           stripe_subscription_id, tv_username, current_period_end
+           FROM site_subs WHERE email=?""", (email,)).fetchone()
+    if not row:
+        return None
+    return dict(zip(
+        ("email", "plan", "status", "stripe_customer_id",
+         "stripe_subscription_id", "tv_username",
+         "current_period_end"), row))
+
+
+def _save_problem(d, email):
+    """None when the member may be shown / granted the save offer,
+    else the reason (also the block-log reason)."""
+    if d is None:
+        return "no subscription on file"
+    if email in REF_EMAIL_TEST_SKIP:
+        return "tester excluded"
+    if d["plan"] == "Lifetime" or d["status"] == "lifetime":
+        return "lifetime has no renewal to discount"
+    if d["status"] not in SAVE_ELIGIBLE_STATUSES:
+        return f"status {d['status']} not eligible"
+    if not d["stripe_subscription_id"]:
+        return "no recurring subscription on file"
+    return None
+
+
+def _stripe_sub_live(sub_id):
+    """Best-effort live read of a subscription (cancel flag, period
+    end) for the save/cancel screens. None on any failure - the
+    screens fall back to the row on file."""
+    if not STRIPE_SECRET_KEY or not sub_id:
+        return None
+    try:
+        return _stripe_get(f"subscriptions/{sub_id}")
+    except Exception as e:
+        print(f"[save] live sub read failed for {sub_id}: {e}",
+              flush=True)
+        return None
+
+
+def _save_redeem(con, email):
+    """Grant the save offer: apply the SAVE25 coupon to the
+    subscription, clear any pending cancel_at_period_end, stamp the
+    identity. Refusals are logged to save_events like referral
+    blocks. Returns a result dict; never raises."""
+    d = _save_row(con, email)
+    problem = _save_problem(d, email)
+    if problem:
+        _save_event(con, email, "blocked", problem,
+                    d["stripe_subscription_id"] if d else None)
+        con.commit()
+        return {"ok": False, "reason": problem}
+    card = _stripe_card_fingerprint(d["stripe_customer_id"])
+    if _identity_save_used(con, email, tv=d["tv_username"],
+                           card=card):
+        _save_event(con, email, "blocked", "save already used",
+                    d["stripe_subscription_id"])
+        con.commit()
+        return {"ok": False, "reason": "save already used"}
+    coupon_id = _save_coupon_id()
+    if not coupon_id:
+        return {"ok": False,
+                "reason": "save coupon missing - run save-setup"}
+    sub_id = d["stripe_subscription_id"]
+    try:
+        updated = _stripe_post(
+            f"subscriptions/{sub_id}",
+            {"discounts[0][coupon]": coupon_id,
+             "cancel_at_period_end": "false"})
+    except Exception:
+        # Older API shape: a single coupon field on the update.
+        updated = _stripe_post(
+            f"subscriptions/{sub_id}",
+            {"coupon": coupon_id, "cancel_at_period_end": "false"})
+    if updated.get("cancel_at_period_end"):
+        _stripe_post(f"subscriptions/{sub_id}",
+                     {"cancel_at_period_end": "false"})
+    _stamp_save_used(con, email)
+    _save_event(con, email, "redeemed", None, sub_id)
+    con.commit()
+    print(f"[save] redeemed for {email}: sub={sub_id} "
+          f"coupon={coupon_id}", flush=True)
+    return {"ok": True, "email": email, "subscription": sub_id,
+            "coupon": coupon_id}
+
+
+@app.post("/stripe/save-setup")
+def stripe_save_setup(key: str = ""):
+    """Keyed, idempotent: make sure the SAVE25 coupon exists in
+    Stripe - 25% off, duration once, restricted to the membership
+    product (all plans share it, Indicators Only included). No
+    promotion code is ever created for it: the app applies the
+    coupon directly to a subscription at redemption."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    try:
+        cid = _save_coupon_id()
+        if cid:
+            return {"coupon": cid, "created": False}
+        products = []
+        for p in PROMO_PLANS.values():
+            price = _stripe_get(f"prices/{p['price_id']}")
+            prod = price.get("product")
+            if prod and prod not in products:
+                products.append(prod)
+        fields = {
+            "percent_off": "25", "duration": "once",
+            "name": "Cancel-save - 25% off next payment",
+            "metadata[sbyb]": SAVE25_TAG}
+        for i, prod in enumerate(products):
+            fields[f"applies_to[products][{i}]"] = prod
+        coupon = _stripe_post("coupons", fields)
+        _SAVE_COUPON_CACHE.update(
+            {"id": coupon.get("id"), "ts": time.time()})
+        return {"coupon": coupon.get("id"), "created": True,
+                "products": products}
+    except Exception as e:
+        return JSONResponse({"detail": f"save setup failed: {e}"},
+                            status_code=502)
+
+
+@app.post("/stripe/save-redeem")
+def stripe_save_redeem(payload: dict, key: str = ""):
+    """Keyed: redeem the cancel-save offer for one member by email
+    (identity checks, one-time stamp and block logging all live in
+    _save_redeem). The public /save/<code> accept path resolves the
+    code to the email and calls the same core."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    email = (payload.get("email") or "").strip().lower()
+    if not email:
+        return JSONResponse({"detail": "email required"},
+                            status_code=400)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    con = _subs_db()
+    try:
+        return _save_redeem(con, email)
+    finally:
+        con.close()
+
+
+@app.get("/stripe/save-events")
+def stripe_save_events(key: str = "", since_id: int = 0):
+    """Keyed: cancel-save audit log (redeemed / blocked) after an
+    id, for verification and reporting."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _subs_db()
+    try:
+        rows = con.execute(
+            "SELECT id, ts, email, event, reason, sub_id "
+            "FROM save_events WHERE id>? ORDER BY id",
+            (since_id,)).fetchall()
+    finally:
+        con.close()
+    return {"events": [
+        dict(zip(("id", "ts", "email", "event", "reason", "sub_id"),
+                 r)) for r in rows]}
+
+
+@app.get("/stripe/cancel-feedback")
+def stripe_cancel_feedback(key: str = "", since_id: int = 0):
+    """Keyed: completed cancel-feedback answers after an id.
+    site_sync pulls these into support-inbox/cancel-feedback.md."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _subs_db()
+    try:
+        rows = con.execute(
+            "SELECT id, ts, email, sub_id, plan, q1, q2, q3 "
+            "FROM cancel_feedback WHERE id>? ORDER BY id",
+            (since_id,)).fetchall()
+    finally:
+        con.close()
+    return {"feedback": [
+        dict(zip(("id", "ts", "email", "sub_id", "plan", "q1", "q2",
+                  "q3"), r)) for r in rows]}
+
+
+def _email_for_code(con, code):
+    """Resolve a member's personal code (the same email-derived
+    code as /ref/<code>) back to their email, or None."""
+    code = (code or "").strip().upper()
+    if not code:
+        return None
+    for (em,) in con.execute("SELECT email FROM site_subs").fetchall():
+        if _ref_code(em) == code:
+            return em
+    return None
+
+
+def _fmt_day(ts):
+    if not ts:
+        return None
+    return time.strftime("%b %d, %Y", time.localtime(float(ts)))
+
+
+def _bad_link_page():
+    body = ('<div class="big">That link does not look right.</div>'
+            "<p>Check the link from your email, or manage your "
+            "subscription from the access page instead.</p>"
+            f'<div class="small">Questions? Email {SUPPORT_EMAIL}'
+            "</div>")
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+_MANAGE_FORM = """<p>Enter the email you subscribed with to manage
+or cancel your subscription.</p>
+<form method="post" action="/manage">
+<p><input name="email" type="email" required placeholder="Email you subscribed with"
+style="padding:12px 16px;border-radius:8px;border:1px solid #3a4542;background:#111;color:#fff;width:320px;max-width:84vw"></p>
+<p><button class="btn" type="submit" style="border:0;cursor:pointer">CONTINUE</button></p>
+</form>"""
+
+
+@app.get("/manage", response_class=HTMLResponse)
+def manage_page():
+    return ACCESS_PAGE.replace("__BODY__", _MANAGE_FORM)
+
+
+@app.post("/manage")
+async def manage_submit(request: Request):
+    from urllib.parse import parse_qs
+    form = parse_qs((await request.body()).decode("utf-8", "replace"))
+    email = (form.get("email", [""])[0] or "").strip().lower()[:254]
+    con = _subs_db()
+    try:
+        d = _save_row(con, email) if email else None
+        if d and (d["plan"] == "Lifetime" or d["status"] == "lifetime"):
+            body = ('<div class="big">Nothing to cancel here.</div>'
+                    "<p>Your plan is Lifetime - a one-time payment. "
+                    "There is no renewal and nothing to cancel.</p>"
+                    f'<div class="small">Questions? Email '
+                    f"{SUPPORT_EMAIL}</div>")
+            return HTMLResponse(ACCESS_PAGE.replace("__BODY__", body))
+        if d and d["status"] in SAVE_ELIGIBLE_STATUSES:
+            code = _ref_code(email)
+            card = _stripe_card_fingerprint(d["stripe_customer_id"])
+            used = _identity_save_used(
+                con, email, tv=d["tv_username"], card=card)
+            target = (f"/cancel/{code}" if used
+                      else f"/save/{code}")
+            return RedirectResponse(target, status_code=303)
+    finally:
+        con.close()
+    body = ('<div class="big">No active subscription found.</div>'
+            "<p>That email does not match an active subscription. "
+            "Make sure it is the email you subscribed with - and if "
+            "you just signed up, give it a minute and try again.</p>"
+            + _MANAGE_FORM)
+    return HTMLResponse(ACCESS_PAGE.replace("__BODY__", body))
+
+
+def _save_screen(email, d, live):
+    code = _ref_code(email)
+    pending = bool(live and live.get("cancel_at_period_end"))
+    end = _fmt_day((live or {}).get("current_period_end")
+                   or d["current_period_end"])
+    note = ""
+    if pending and end:
+        note = (f"<p>Your subscription is currently set to cancel "
+                f"on {end}. Accept below and the cancel is undone - "
+                "you stay a member.</p>")
+    elif pending:
+        note = ("<p>Your subscription is currently set to cancel. "
+                "Accept below and the cancel is undone - you stay a "
+                "member.</p>")
+    body = (
+        '<div class="big">Stay and get 25% off your next '
+        "month</div>"
+        f"{note}"
+        "<p>Accept and 25% comes off your next payment "
+        "automatically - same plan, same access, nothing else "
+        "changes. This is a one-time offer.</p>"
+        f'<form method="post" action="/save/{code}/accept">'
+        '<p><button class="btn" type="submit" '
+        'style="border:0;cursor:pointer">ACCEPT - STAY AND SAVE '
+        "25%</button></p></form>"
+        f'<p><a href="/save/{code}/decline">No thanks, cancel</a>'
+        "</p>"
+        f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>')
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+@app.get("/save/{code}", response_class=HTMLResponse)
+def save_page(code: str):
+    con = _subs_db()
+    try:
+        email = _email_for_code(con, code)
+        if not email:
+            return HTMLResponse(_bad_link_page())
+        d = _save_row(con, email)
+        problem = _save_problem(d, email)
+        if problem == "lifetime has no renewal to discount":
+            body = ('<div class="big">Nothing to cancel here.</div>'
+                    "<p>Your plan is Lifetime - a one-time payment. "
+                    "There is no renewal and nothing to cancel.</p>"
+                    f'<div class="small">Questions? Email '
+                    f"{SUPPORT_EMAIL}</div>")
+            return HTMLResponse(ACCESS_PAGE.replace("__BODY__", body))
+        if problem:
+            body = ('<div class="big">This subscription is no '
+                    "longer active.</div><p>There is nothing to "
+                    "cancel or change here.</p>"
+                    f'<div class="small">Questions? Email '
+                    f"{SUPPORT_EMAIL}</div>")
+            return HTMLResponse(ACCESS_PAGE.replace("__BODY__", body))
+        card = _stripe_card_fingerprint(d["stripe_customer_id"])
+        used = _identity_save_used(con, email, tv=d["tv_username"],
+                                   card=card)
+        live = _stripe_sub_live(d["stripe_subscription_id"])
+        if used:
+            if live and live.get("cancel_at_period_end"):
+                end = _fmt_day(live.get("current_period_end")
+                               or d["current_period_end"])
+                until = f" until {end}" if end else ""
+                body = (
+                    '<div class="big">Your cancellation is already '
+                    "set.</div>"
+                    f"<p>Your access runs{until}, and you will not "
+                    "be charged again. The 25% stay offer was "
+                    "already used on this membership, so it cannot "
+                    "be applied again.</p>"
+                    f'<div class="small">Changed your mind about '
+                    f"cancelling? Email {SUPPORT_EMAIL} and I will "
+                    "sort it out.</div>")
+                return HTMLResponse(
+                    ACCESS_PAGE.replace("__BODY__", body))
+            return RedirectResponse(f"/cancel/{_ref_code(email)}",
+                                    status_code=303)
+        return HTMLResponse(_save_screen(email, d, live))
+    finally:
+        con.close()
+
+
+@app.post("/save/{code}/accept", response_class=HTMLResponse)
+def save_accept(code: str):
+    con = _subs_db()
+    try:
+        email = _email_for_code(con, code)
+        if not email:
+            return HTMLResponse(_bad_link_page())
+        result = _save_redeem(con, email)
+    finally:
+        con.close()
+    if result.get("ok"):
+        body = ('<div class="big">You\'re staying - 25% off your '
+                "next payment is applied.</div>"
+                "<p>The discount is on your subscription now and "
+                "comes off your next payment automatically. Any "
+                "pending cancellation has been undone.</p>"
+                f'<div class="small">Questions? Email {SUPPORT_EMAIL}'
+                "</div>")
+    else:
+        body = ('<div class="big">That offer is not available '
+                "here.</div><p>It may already have been used on "
+                "this membership, or the subscription is no longer "
+                "active. Nothing was changed.</p>"
+                f'<div class="small">Questions? Email {SUPPORT_EMAIL}'
+                "</div>")
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+def _feedback_form(code, note=""):
+    radios = "".join(
+        f'<p><label><input type="radio" name="q1" value="{r}" '
+        f"required> {r}</label></p>" for r in SAVE_REASONS)
+    yn = "".join(
+        f'<p><label><input type="radio" name="q3" value="{v}" '
+        f"required> {v}</label></p>" for v in ("Yes", "No"))
+    body = (
+        '<div class="big">Before you go - three quick '
+        "questions</div>"
+        f"{note}"
+        f'<form method="post" action="/cancel/{code}/feedback">'
+        "<p><b>What is the main reason you are leaving?</b></p>"
+        f"{radios}"
+        "<p><b>What could I change to keep you?</b> "
+        "(optional)</p>"
+        '<p><textarea name="q2" rows="3" '
+        'style="padding:12px 16px;border-radius:8px;border:1px '
+        'solid #3a4542;background:#111;color:#fff;width:320px;'
+        'max-width:84vw"></textarea></p>'
+        "<p><b>Would you come back if that changed?</b></p>"
+        f"{yn}"
+        '<p><button class="btn" type="submit" '
+        'style="border:0;cursor:pointer">CANCEL MY SUBSCRIPTION'
+        "</button></p></form>"
+        f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>')
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+@app.get("/save/{code}/decline", response_class=HTMLResponse)
+def save_decline(code: str):
+    con = _subs_db()
+    try:
+        email = _email_for_code(con, code)
+    finally:
+        con.close()
+    if not email:
+        return HTMLResponse(_bad_link_page())
+    return HTMLResponse(_feedback_form(_ref_code(email)))
+
+
+@app.get("/cancel/{code}", response_class=HTMLResponse)
+def cancel_page(code: str):
+    con = _subs_db()
+    try:
+        email = _email_for_code(con, code)
+    finally:
+        con.close()
+    if not email:
+        return HTMLResponse(_bad_link_page())
+    return HTMLResponse(_feedback_form(_ref_code(email)))
+
+
+@app.post("/cancel/{code}/feedback", response_class=HTMLResponse)
+async def cancel_feedback_submit(code: str, request: Request):
+    from urllib.parse import parse_qs
+    form = parse_qs((await request.body()).decode("utf-8", "replace"))
+    q1 = (form.get("q1", [""])[0] or "").strip()
+    q2 = (form.get("q2", [""])[0] or "").strip()[:2000]
+    q3 = (form.get("q3", [""])[0] or "").strip()
+    con = _subs_db()
+    try:
+        email = _email_for_code(con, code)
+        if not email:
+            return HTMLResponse(_bad_link_page())
+        if q1 not in SAVE_REASONS or q3 not in ("Yes", "No"):
+            note = ("<p>Please answer questions 1 and 3 so I can "
+                    "finish the cancellation.</p>")
+            return HTMLResponse(
+                _feedback_form(_ref_code(email), note))
+        d = _save_row(con, email)
+        sub_id = d["stripe_subscription_id"] if d else None
+        con.execute(
+            "INSERT INTO cancel_feedback(ts, email, sub_id, plan, "
+            "q1, q2, q3) VALUES(?,?,?,?,?,?,?)",
+            (time.time(), email, sub_id,
+             d["plan"] if d else None, q1, q2, q3))
+        con.execute(
+            "UPDATE site_subs SET cancel_reason=? WHERE email=?",
+            (q1, email))
+        con.commit()
+    finally:
+        con.close()
+    # Durable copy of the reason on Stripe (the row copy is wiped
+    # on redeploy; the boot self-heal restores it from here).
+    if sub_id:
+        try:
+            _stripe_post(f"subscriptions/{sub_id}",
+                         {"metadata[sbyb_cancel_reason]": q1})
+        except Exception as e:
+            print(f"[save] cancel-reason stamp failed for "
+                  f"{email}: {e}", flush=True)
+    period_end = None
+    cancel_ok = False
+    if sub_id:
+        try:
+            sub = _stripe_post(
+                f"subscriptions/{sub_id}",
+                {"cancel_at_period_end": "true"})
+            items = (sub.get("items") or {}).get("data") or []
+            period_end = sub.get("current_period_end") or (
+                items[0].get("current_period_end") if items else None)
+            cancel_ok = bool(sub.get("cancel_at_period_end"))
+        except Exception as e:
+            print(f"[save] feedback cancel failed for {email} "
+                  f"({sub_id}): {e}", flush=True)
+    if cancel_ok:
+        end = _fmt_day(period_end)
+        until = f" until {end}" if end else ""
+        body = ('<div class="big">Your subscription is '
+                "cancelled.</div>"
+                f"<p>You keep full access{until}, and you will not "
+                "be charged again. Your Telegram and TradingView "
+                "access ends when the period ends.</p>"
+                "<p>Thanks for the answers - they genuinely help "
+                "me make this better.</p>"
+                f'<div class="small">Changed your mind before '
+                f"then? Email {SUPPORT_EMAIL} and I will sort it "
+                "out.</div>")
+    else:
+        body = ('<div class="big">Your answers are saved, but the '
+                "cancel did not finish.</div>"
+                f"<p>Please email {SUPPORT_EMAIL} and I will cancel "
+                "it for you right away - mention that the website "
+                "cancel did not go through.</p>")
+    return ACCESS_PAGE.replace("__BODY__", body)
 
 
 # ---------- referral program: give a month, get a month ----------
