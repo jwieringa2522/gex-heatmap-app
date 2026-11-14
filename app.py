@@ -934,6 +934,12 @@ def _subs_db():
     con.execute("""CREATE TABLE IF NOT EXISTS cancel_feedback(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, email TEXT,
         sub_id TEXT, plan TEXT, q1 TEXT, q2 TEXT, q3 TEXT)""")
+    # Win-back offers (Nov 14 2026): one row per win-back email
+    # sent. The durable never-twice guard is the sbyb_winback_sent_ts
+    # stamp on the Stripe customer; this log is reporting only.
+    con.execute("""CREATE TABLE IF NOT EXISTS winback_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, email TEXT,
+        customer_id TEXT, code TEXT, plan TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS stripe_events(
         event_id TEXT PRIMARY KEY, type TEXT, ts REAL)""")
     con.execute("""CREATE TABLE IF NOT EXISTS tv_claims(
@@ -4868,6 +4874,373 @@ async def cancel_feedback_submit(code: str, request: Request):
                 "it for you right away - mention that the website "
                 "cancel did not go through.</p>")
     return ACCESS_PAGE.replace("__BODY__", body)
+
+
+# ---------- win-back offers for abandoned checkouts (Nov 14 2026) ----------
+# A Stripe customer who started checkout and never finished has no
+# subscription and no completed payment, so no new-subscriber alert
+# ever fired for them (first case: Dennis Becker, Nov 10, Quarterly -
+# found by Justin in the dashboard). About 24 hours after the
+# attempt they get ONE email with a personal 20%-off-first-payment
+# code. Scope matches the promo program: Monthly / Quarterly /
+# Yearly first payment only (coupon restricted to the shared
+# membership product; Lifetime and Indicators Only links reject
+# codes anyway). Each code is created per person with a real 7-day
+# Stripe expires_at and max_redemptions=1, so the deadline in the
+# email is enforced by Stripe itself. The never-twice guard is a
+# metadata stamp on the Stripe customer (sbyb_winback_sent_ts) -
+# durable across app redeploys, the welcome-email pattern. Run
+# daily by the site-winback-daily cron. Separate from the promo
+# machine (SAVE10/SAVE15) and from REF10; neither is touched here.
+WINBACK_TAG = "winback20"
+WINBACK_SINCE = 1793509200  # 2026-11-01 00:00 America/Winnipeg
+WINBACK_MIN_AGE_SECS = 24 * 3600
+WINBACK_CODE_TTL_SECS = 7 * 86400
+_WINBACK_COUPON_CACHE = {"id": None, "ts": 0.0}
+_WINBACK_AMOUNTS = {2000: "Monthly", 4500: "Quarterly",
+                    15000: "Yearly"}
+
+
+def _winback_coupon_id():
+    now = time.time()
+    if (_WINBACK_COUPON_CACHE["id"]
+            and now - _WINBACK_COUPON_CACHE["ts"] < 600):
+        return _WINBACK_COUPON_CACHE["id"]
+    cid = None
+    try:
+        coupons = _stripe_get("coupons?limit=100").get("data") or []
+        c = next((c for c in coupons
+                  if (c.get("metadata") or {}).get("sbyb")
+                  == WINBACK_TAG and c.get("valid")), None)
+        cid = c.get("id") if c else None
+    except Exception as e:
+        print(f"[winback] coupon lookup failed: {e}", flush=True)
+    _WINBACK_COUPON_CACHE.update({"id": cid, "ts": now})
+    return cid
+
+
+@app.post("/winback/setup")
+def winback_setup(key: str = ""):
+    """Keyed, idempotent: make sure the 20%-off-first-payment
+    win-back coupon exists (duration once, restricted to the
+    membership product the M/Q/Y plans share)."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    try:
+        cid = _winback_coupon_id()
+        if cid:
+            return {"coupon": cid, "created": False}
+        products = []
+        for p in PROMO_PLANS.values():
+            price = _stripe_get(f"prices/{p['price_id']}")
+            prod = price.get("product")
+            if prod and prod not in products:
+                products.append(prod)
+        fields = {
+            "percent_off": "20", "duration": "once",
+            "name": "Win-back - 20% off first payment",
+            "metadata[sbyb]": WINBACK_TAG}
+        for i, prod in enumerate(products):
+            fields[f"applies_to[products][{i}]"] = prod
+        coupon = _stripe_post("coupons", fields)
+        _WINBACK_COUPON_CACHE.update(
+            {"id": coupon.get("id"), "ts": time.time()})
+        return {"coupon": coupon.get("id"), "created": True,
+                "products": products}
+    except Exception as e:
+        return JSONResponse({"detail": f"stripe error: {e}"},
+                            status_code=502)
+
+
+def _winback_plan_for(customer_id):
+    """Infer the plan an abandoned checkout was for, from the money
+    trail Stripe left on the customer: payment intents, then
+    charges, then invoices - amounts map to the M/Q/Y first
+    payments. None when nothing usable (the email then links the
+    Monthly checkout; the code works on all three plans anyway)."""
+    for path, keys in (
+            (f"payment_intents?customer={customer_id}&limit=20",
+             ("amount",)),
+            (f"charges?customer={customer_id}&limit=20",
+             ("amount",)),
+            (f"invoices?customer={customer_id}&limit=20",
+             ("amount_due", "total"))):
+        try:
+            rows = _stripe_get(path).get("data") or []
+        except Exception as e:
+            print(f"[winback] {path.split('?')[0]} read failed for "
+                  f"{customer_id}: {e}", flush=True)
+            continue
+        for r in rows:
+            for k in keys:
+                plan = _WINBACK_AMOUNTS.get(r.get(k) or 0)
+                if plan:
+                    return plan
+    return None
+
+
+def _winback_candidates():
+    """The abandoned checkouts since launch: Stripe customers with
+    an email who never completed a payment and never had a
+    subscription (an incomplete_expired subscription is itself a
+    checkout that never finished, so it does not disqualify).
+    Grouped by email: if ANY record for the email paid, holds a
+    real subscription, is a member on file, or was already sent a
+    win-back, the email is out."""
+    out = []
+    if not STRIPE_SECRET_KEY:
+        return out
+    con = _subs_db()
+    try:
+        member_emails = {(r[0] or "").strip().lower() for r in
+                         con.execute("SELECT email FROM site_subs")}
+    finally:
+        con.close()
+    customers, cursor = [], None
+    for _ in range(10):
+        path = ("customers?limit=100&created[gte]="
+                f"{WINBACK_SINCE}")
+        if cursor:
+            path += f"&starting_after={cursor}"
+        page = _stripe_get(path)
+        data = page.get("data") or []
+        customers.extend(data)
+        if not page.get("has_more") or not data:
+            break
+        cursor = data[-1].get("id")
+    groups = {}
+    for c in customers:
+        email = (c.get("email") or "").strip().lower()
+        if not email or "@" not in email:
+            continue
+        groups.setdefault(email, []).append(c)
+    now = time.time()
+    for email, records in sorted(
+            groups.items(),
+            key=lambda kv: min(r.get("created") or 0
+                               for r in kv[1])):
+        if email in REF_EMAIL_TEST_SKIP or email in member_emails:
+            continue
+        sent_ts = None
+        for r in records:
+            raw = (r.get("metadata") or {}).get(
+                "sbyb_winback_sent_ts")
+            if raw:
+                try:
+                    sent_ts = float(raw)
+                except (TypeError, ValueError):
+                    pass
+        disqualified = False
+        for r in records:
+            cid = r.get("id")
+            try:
+                subs = _stripe_get(
+                    f"subscriptions?customer={cid}&status=all"
+                    "&limit=100").get("data") or []
+            except Exception as e:
+                print(f"[winback] subs read failed for {cid}: {e}",
+                      flush=True)
+                subs = []
+            if any(s.get("status") != "incomplete_expired"
+                   for s in subs):
+                disqualified = True
+                break
+            try:
+                charges = _stripe_get(
+                    f"charges?customer={cid}&limit=100"
+                ).get("data") or []
+            except Exception as e:
+                print(f"[winback] charges read failed for {cid}: "
+                      f"{e}", flush=True)
+                charges = []
+            if any(ch.get("status") == "succeeded"
+                   and (ch.get("amount") or 0) > 0
+                   for ch in charges):
+                disqualified = True
+                break
+        if disqualified:
+            continue
+        first = min(records, key=lambda r: r.get("created") or 0)
+        created = first.get("created") or 0
+        plan = None
+        for r in sorted(records,
+                        key=lambda r: r.get("created") or 0):
+            plan = _winback_plan_for(r.get("id"))
+            if plan:
+                break
+        out.append({
+            "email": email,
+            "name": first.get("name") or "",
+            "customer_ids": [r.get("id") for r in records],
+            "created_ts": created,
+            "age_hours": (round((now - created) / 3600, 1)
+                          if created else None),
+            "plan": plan,
+            "already_sent_ts": sent_ts,
+            "eligible": bool(
+                created
+                and now - created >= WINBACK_MIN_AGE_SECS
+                and not sent_ts),
+        })
+    return out
+
+
+def _winback_compose(cand, code):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    name = (cand.get("name") or "").strip()
+    first = ""
+    if name:
+        token = name.split()[0]
+        if (token.replace("-", "").replace("'", "").isalpha()
+                and len(token) <= 40):
+            first = token
+    greeting = f"Hi {first}," if first else "Hi,"
+    created = cand.get("created_ts") or 0
+    day = ""
+    if created:
+        day = datetime.fromtimestamp(
+            created, ZoneInfo("America/Winnipeg")).strftime("%b %-d")
+    plan = cand.get("plan")
+    started = ("You started signing up for SpyBeforeYouBuy"
+               + (f" on {day}" if day else "")
+               + (f" ({plan})" if plan else "")
+               + " but the checkout never finished - no charge "
+                 "went through.")
+    link = (PROMO_PLANS[(plan or "Monthly").lower()]["url"]
+            + f"?prefilled_promo_code={code}")
+    subject = "Your 20% off is waiting - SpyBeforeYouBuy"
+    body = f"""{greeting}
+
+{started}
+
+If you are still interested, here is 20% off your first payment: code {code}. It works on Monthly, Quarterly and Yearly, and it is good for 7 days.
+
+Finish signing up here: {link}
+
+Any questions, just reply to this email.
+
+- SpyBeforeYouBuy"""
+    return subject, body
+
+
+def _winback_send(cand):
+    """Create the personal code, send the email, stamp the
+    customer(s). Returns a result dict; never raises."""
+    email = cand["email"]
+    coupon_id = _winback_coupon_id()
+    if not coupon_id:
+        return {"email": email, "ok": False,
+                "reason": "win-back coupon missing - run "
+                          "winback setup"}
+    import secrets
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    code = "BACK20" + "".join(
+        secrets.choice(alphabet) for _ in range(6))
+    now = time.time()
+    try:
+        _stripe_post("promotion_codes", {
+            "promotion[type]": "coupon",
+            "promotion[coupon]": coupon_id,
+            "code": code,
+            "expires_at": str(int(now + WINBACK_CODE_TTL_SECS)),
+            "max_redemptions": "1",
+            "metadata[sbyb]": WINBACK_TAG,
+            "metadata[customer]": cand["customer_ids"][0],
+            "metadata[email]": email})
+    except Exception as e:
+        return {"email": email, "ok": False,
+                "reason": f"code creation failed: {e}"}
+    subject, body = _winback_compose(cand, code)
+    if not _resend_send(email, subject, body):
+        return {"email": email, "ok": False,
+                "reason": "email send failed", "code": code}
+    for cid in cand["customer_ids"]:
+        try:
+            _stripe_post(f"customers/{cid}", {
+                "metadata[sbyb_winback_sent_ts]": str(int(now)),
+                "metadata[sbyb_winback_code]": code})
+        except Exception as e:
+            print(f"[winback] stamp failed for {cid}: {e}",
+                  flush=True)
+    con = _subs_db()
+    try:
+        con.execute(
+            """INSERT INTO winback_log(ts, email, customer_id,
+               code, plan) VALUES(?,?,?,?,?)""",
+            (now, email, cand["customer_ids"][0], code,
+             cand.get("plan")))
+        con.commit()
+    finally:
+        con.close()
+    print(f"[winback] sent to {email}: code={code} "
+          f"plan={cand.get('plan')}", flush=True)
+    return {"email": email, "ok": True, "code": code,
+            "plan": cand.get("plan"),
+            "customer": cand["customer_ids"][0]}
+
+
+@app.get("/winback/candidates")
+def winback_candidates(key: str = ""):
+    """Keyed sweep read: every abandoned checkout since launch,
+    with inferred plan, age and sent state. Sends nothing."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    cands = _winback_candidates()
+    return {"count": len(cands), "candidates": cands}
+
+
+@app.post("/winback/run")
+def winback_run(payload: dict = None, key: str = ""):
+    """Keyed: send the win-back email to every eligible abandoned
+    checkout (24h+ old, never sent). Optional {"email": ...}
+    limits the run to one person - used to send the first live
+    case and verify it before the general pass."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY:
+        return JSONResponse({"detail": "stripe key not configured"},
+                            status_code=500)
+    only = ((payload or {}).get("email") or "").strip().lower()
+    sent, skipped = [], []
+    for cand in _winback_candidates():
+        if only and cand["email"] != only:
+            continue
+        if cand["already_sent_ts"]:
+            skipped.append({"email": cand["email"],
+                            "reason": "already sent"})
+            continue
+        if not cand["eligible"]:
+            skipped.append({"email": cand["email"],
+                            "reason": "under 24h old"})
+            continue
+        sent.append(_winback_send(cand))
+    return {"sent": sent, "skipped": skipped}
+
+
+@app.get("/winback/log")
+def winback_log(key: str = "", since_id: int = 0):
+    """Keyed: the win-back sends on file (reporting; the durable
+    never-twice guard is the Stripe customer stamp)."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _subs_db()
+    try:
+        rows = con.execute(
+            """SELECT id, ts, email, customer_id, code, plan
+               FROM winback_log WHERE id>? ORDER BY id""",
+            (since_id,)).fetchall()
+    finally:
+        con.close()
+    return {"log": [dict(zip(
+        ("id", "ts", "email", "customer_id", "code", "plan"), r))
+        for r in rows]}
 
 
 # ---------- referral program: give a month, get a month ----------
