@@ -1732,7 +1732,15 @@ def _promo_state(force=False):
         promo = _promo_find_code(code_str)
         if not promo or not promo.get("active"):
             continue
+        # Window end: the code's own expires_at when set, else the
+        # ends_at stamped into its metadata at activation (this API
+        # version will not update expires_at after creation, so the
+        # metadata stamp is the backstop - past it, the promo reads
+        # as off even if a deactivation is ever missed).
         exp = promo.get("expires_at")
+        if not exp:
+            raw = (promo.get("metadata") or {}).get("sbyb_ends_at")
+            exp = int(raw) if raw else None
         if exp and exp <= now:
             continue
         state = {"active": True, "percent": pct, "code": code_str,
@@ -1854,7 +1862,8 @@ def promo_activate(payload: dict, key: str = ""):
                     status_code=409)
             if p2 == pct:
                 _stripe_post(f"promotion_codes/{promo['id']}", {
-                    "active": "true", "expires_at": str(int(ends_at))})
+                    "active": "true",
+                    "metadata[sbyb_ends_at]": str(int(ends_at))})
             elif promo.get("active"):
                 _stripe_post(f"promotion_codes/{promo['id']}",
                              {"active": "false"})
