@@ -4756,6 +4756,7 @@ def _scripted_answer(q: str) -> str | None:
         if _ps.get("active"):
             _end = ""
             if _ps.get("ends_at"):
+                from datetime import datetime
                 from zoneinfo import ZoneInfo
                 _end = (" It ends " + datetime.fromtimestamp(
                     _ps["ends_at"], ZoneInfo("America/Winnipeg")
