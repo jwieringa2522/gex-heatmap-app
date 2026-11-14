@@ -3751,11 +3751,16 @@ def stripe_card_clashes(key: str = "", since_id: int = 0):
             """SELECT id, ts, email, other_email, sub_id, refund_id,
                    refund_cents FROM card_clashes WHERE id>?
                ORDER BY id""", (since_id,)).fetchall()
+        registry = [dict(zip(("fingerprint_tail", "email"), r))
+                    for r in con.execute(
+                        "SELECT substr(fingerprint, -4), email "
+                        "FROM card_registry ORDER BY first_seen_ts")]
     finally:
         con.close()
     cols = ("id", "ts", "email", "other_email", "sub_id",
             "refund_id", "refund_cents")
-    return {"clashes": [dict(zip(cols, r)) for r in rows]}
+    return {"clashes": [dict(zip(cols, r)) for r in rows],
+            "registry": registry}
 
 
 def _enforce_trial_policy(con, email, sub_id, customer_id,
