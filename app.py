@@ -898,6 +898,16 @@ def _subs_db():
     if "ref_email_sent_ts" not in cols:
         con.execute(
             "ALTER TABLE site_subs ADD COLUMN ref_email_sent_ts REAL")
+    # One card, one subscription (Nov 14 2026): the card registry
+    # maps a card fingerprint to the member who first used it; the
+    # clash log is the audit trail the owner alert reads.
+    con.execute("""CREATE TABLE IF NOT EXISTS card_registry(
+        fingerprint TEXT PRIMARY KEY, email TEXT, customer_id TEXT,
+        sub_id TEXT, first_seen_ts REAL, last_seen_ts REAL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS card_clashes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, email TEXT,
+        other_email TEXT, sub_id TEXT, refund_id TEXT,
+        refund_cents INTEGER)""")
     # One-trial / one-refund identity registry (Nov 2 2026). Local
     # mirror only - the durable stamps live on Stripe (subscription +
     # customer metadata) and this table is rebuilt from them at boot
@@ -1108,6 +1118,12 @@ def _on_checkout_completed(con, obj):
     print(f"[stripe] checkout completed: {email} plan={plan} "
           f"status={status} session={obj.get('id')} "
           f"invite={'yes' if invite else 'NO'}", flush=True)
+    # One card, one subscription (Nov 14 2026): register this
+    # checkout's card, or kill the subscription on a clash - before
+    # anything else (attribution, trial stamps, Lifetime handling)
+    # treats the new subscription as real.
+    if _enforce_card_rule(con, obj, email):
+        return
     if mode == "payment" and old_sub_id:
         # Lifetime bought: stop the recurring subscription so the member
         # is never double-charged. If the cancel cannot run (no API key
@@ -3584,6 +3600,164 @@ def _sub_ids(con, email):
     return row if row else (None, None, None)
 
 
+CARD_LIVE_STATUSES = ("active", "trialing", "past_due", "lifetime")
+
+
+def _card_owner_live(con, email):
+    row = con.execute(
+        "SELECT status FROM site_subs WHERE email=?",
+        (email,)).fetchone()
+    return bool(row) and row[0] in CARD_LIVE_STATUSES
+
+
+def _card_clash_owner(con, fingerprint, email, customer_id):
+    """One card, one subscription (Justin's rule, Nov 14 2026): if
+    this card is registered to a DIFFERENT email and customer whose
+    subscription is live, return that owner's email - a clash. Same
+    email or same customer is always fine (a member's own second
+    plan on their own account, a card they also use elsewhere)."""
+    if not fingerprint:
+        return None
+    row = con.execute(
+        "SELECT email, customer_id FROM card_registry "
+        "WHERE fingerprint=?", (fingerprint,)).fetchone()
+    if not row:
+        return None
+    other_email, other_customer = row
+    if other_email == email:
+        return None
+    if customer_id and other_customer and other_customer == customer_id:
+        return None
+    if _card_owner_live(con, other_email):
+        return other_email
+    return None
+
+
+def _register_card(con, fingerprint, email, customer_id, sub_id):
+    """Register a card fingerprint to its member. First live owner
+    wins; if the recorded owner's subscription is no longer live,
+    ownership transfers to the new user (a churned member's card
+    legitimately changing hands must not block forever)."""
+    now = time.time()
+    row = con.execute(
+        "SELECT email FROM card_registry WHERE fingerprint=?",
+        (fingerprint,)).fetchone()
+    if row and row[0] != email and not _card_owner_live(con, row[0]):
+        con.execute(
+            "DELETE FROM card_registry WHERE fingerprint=?",
+            (fingerprint,))
+        row = None
+    if row:
+        con.execute(
+            "UPDATE card_registry SET last_seen_ts=? "
+            "WHERE fingerprint=?", (now, fingerprint))
+    else:
+        con.execute(
+            """INSERT INTO card_registry(fingerprint, email,
+                   customer_id, sub_id, first_seen_ts, last_seen_ts)
+               VALUES(?,?,?,?,?,?)""",
+            (fingerprint, email, customer_id, sub_id, now, now))
+    con.commit()
+
+
+def _recent_checkout_charge(customer_id, since_ts):
+    """The succeeded, unrefunded charge this checkout just made, if
+    any (a trialing subscription has none)."""
+    if not STRIPE_SECRET_KEY or not customer_id or SBYB_TEST_MODE:
+        return None
+    try:
+        charges = _stripe_get(
+            f"charges?customer={customer_id}&limit=10"
+        ).get("data") or []
+        for ch in charges:
+            if (ch.get("status") == "succeeded"
+                    and not ch.get("refunded")
+                    and (ch.get("amount") or 0) > 0
+                    and (ch.get("created") or 0) >= since_ts - 1200):
+                return ch
+    except Exception as e:
+        print(f"[card-rule] charge lookup failed for "
+              f"{customer_id}: {e}", flush=True)
+    return None
+
+
+def _enforce_card_rule(con, obj, email):
+    """Runs on every completed checkout, before referral
+    attribution and trial enforcement. Registers the card to this
+    member. On a clash with a different member's LIVE subscription:
+    cancel the new subscription immediately, refund its first
+    charge, log the clash for the owner alert, and return True so
+    the caller skips attribution and trial handling for the dead
+    subscription. (Clash action set Nov 14 2026: cancel + refund -
+    the duplicate should never have been charged; a cancelled-and-
+    refunded duplicate gains the buyer nothing, so it cannot be
+    farmed.)"""
+    customer_id = obj.get("customer")
+    sub_id = obj.get("subscription")
+    card = _stripe_card_fingerprint(customer_id)
+    if not card:
+        return False
+    other = _card_clash_owner(con, card, email, customer_id)
+    if not other:
+        _register_card(con, card, email, customer_id, sub_id)
+        _stripe_stamp_identity(sub_id=sub_id,
+                               customer_id=customer_id, card=card)
+        return False
+    refund_id, refund_cents = None, 0
+    if STRIPE_SECRET_KEY and not SBYB_TEST_MODE:
+        if sub_id:
+            try:
+                _stripe_post(f"subscriptions/{sub_id}/cancel", {})
+            except Exception as e:
+                print(f"[card-rule] cancel failed for {sub_id}: "
+                      f"{e}", flush=True)
+        charge = _recent_checkout_charge(customer_id, time.time())
+        if charge:
+            try:
+                r = _stripe_post("refunds", {"charge": charge["id"]})
+                refund_id = r.get("id")
+                refund_cents = charge.get("amount") or 0
+            except Exception as e:
+                print(f"[card-rule] refund failed for "
+                      f"{charge.get('id')}: {e}", flush=True)
+    now = time.time()
+    con.execute(
+        """INSERT INTO card_clashes(ts, email, other_email, sub_id,
+               refund_id, refund_cents)
+           VALUES(?,?,?,?,?,?)""",
+        (now, email, other, sub_id, refund_id, refund_cents))
+    if sub_id:
+        con.execute(
+            "UPDATE site_subs SET status='canceled', updated_ts=? "
+            "WHERE email=? AND stripe_subscription_id=?",
+            (now, email, sub_id))
+    con.commit()
+    print(f"[card-rule] CLASH {email}: card already live on "
+          f"{other}; new sub {sub_id} cancelled, "
+          f"refund={refund_id} cents={refund_cents}", flush=True)
+    return True
+
+
+@app.get("/stripe/card-clashes")
+def stripe_card_clashes(key: str = "", since_id: int = 0):
+    """Keyed: the card-clash audit log, id-ascending past since_id.
+    The roster sync polls this and prints one CARD CLASH line per
+    new row for the owner alert."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _subs_db()
+    try:
+        rows = con.execute(
+            """SELECT id, ts, email, other_email, sub_id, refund_id,
+                   refund_cents FROM card_clashes WHERE id>?
+               ORDER BY id""", (since_id,)).fetchall()
+    finally:
+        con.close()
+    cols = ("id", "ts", "email", "other_email", "sub_id",
+            "refund_id", "refund_cents")
+    return {"clashes": [dict(zip(cols, r)) for r in rows]}
+
+
 def _enforce_trial_policy(con, email, sub_id, customer_id,
                           tv_username):
     """A subscription just entered trialing. First trial ever for
@@ -3999,6 +4173,23 @@ def _self_heal_subs():
                         "UPDATE site_subs SET trial_repeat=1 "
                         "WHERE stripe_subscription_id=?",
                         (sub.get("id"),))
+                # Card registry rebuild: a card stamped sbyb_card on
+                # a live subscription re-registers to its owner after
+                # a wipe (insert-or-ignore - a live registration made
+                # by a real checkout is never overwritten by a heal).
+                if meta.get("sbyb_card"):
+                    live = con.execute(
+                        "SELECT status FROM site_subs WHERE email=?",
+                        (email,)).fetchone()
+                    if live and live[0] in CARD_LIVE_STATUSES:
+                        con.execute(
+                            """INSERT OR IGNORE INTO card_registry(
+                                   fingerprint, email, customer_id,
+                                   sub_id, first_seen_ts, last_seen_ts)
+                               VALUES(?,?,?,?,?,?)""",
+                            (meta["sbyb_card"], email,
+                             customer.get("id"), sub.get("id"),
+                             now, now))
             con.commit()
             # Rebuild the referrals table from the restored rows:
             # every friend row carries its referrer and state, so
