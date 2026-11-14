@@ -4885,9 +4885,12 @@ async def cancel_feedback_submit(code: str, request: Request):
 # code. Scope matches the promo program: Monthly / Quarterly /
 # Yearly first payment only (coupon restricted to the shared
 # membership product; Lifetime and Indicators Only links reject
-# codes anyway). Each code is created per person with a real 7-day
+# codes anyway). Each code is created per person with a real
 # Stripe expires_at and max_redemptions=1, so the deadline in the
-# email is enforced by Stripe itself. The never-twice guard is a
+# email is enforced by Stripe itself. Expiry was 7 days in the
+# original build; Justin cut it to 3 days later on Nov 14 2026 -
+# the first send (Dennis Becker, earlier that day) keeps the
+# 7 days his email promised; everyone after gets 3. The never-twice guard is a
 # metadata stamp on the Stripe customer (sbyb_winback_sent_ts) -
 # durable across app redeploys, the welcome-email pattern. Run
 # daily by the site-winback-daily cron. Separate from the promo
@@ -4895,7 +4898,7 @@ async def cancel_feedback_submit(code: str, request: Request):
 WINBACK_TAG = "winback20"
 WINBACK_SINCE = 1793509200  # 2026-11-01 00:00 America/Winnipeg
 WINBACK_MIN_AGE_SECS = 24 * 3600
-WINBACK_CODE_TTL_SECS = 7 * 86400
+WINBACK_CODE_TTL_SECS = 3 * 86400
 _WINBACK_COUPON_CACHE = {"id": None, "ts": 0.0}
 _WINBACK_AMOUNTS = {2000: "Monthly", 4500: "Quarterly",
                     15000: "Yearly"}
@@ -5117,7 +5120,7 @@ def _winback_compose(cand, code):
 
 {started}
 
-If you are still interested, here is 20% off your first payment: code {code}. It works on Monthly, Quarterly and Yearly, and it is good for 7 days.
+If you are still interested, here is 20% off your first payment: code {code}. It works on Monthly, Quarterly and Yearly, and it is good for 3 days.
 
 Finish signing up here: {link}
 
