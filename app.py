@@ -2874,14 +2874,11 @@ def _welcome_compose(sub: dict) -> tuple[str, str]:
 
 If this landed in your spam or junk folder, move it to your inbox first - the links below will not work properly from spam.
 
-Entered your TradingView username at checkout? You are already set - skip this step. If you skipped it, enter it here so I can switch your indicators on:
-{GATE_BASE}/tradingview
+Did you enter your TradingView username when you paid? Then you are done - your indicators are being switched on.
+If not, tap this link and enter it now: {GATE_BASE}/tradingview
+No TradingView account yet? Make a free one at tradingview.com first, then enter your username at the same link.
 
-If you do not have a TradingView account yet, make a free one at tradingview.com first, then enter your username at the same link.
-
-Your indicators appear in TradingView under Indicators, then Invite-only scripts.
-
-Your indicators are switched on by hand, so they can take up to 24 hours to appear under Invite-only scripts. If they are not there after 24 hours, reply to this email and I will sort it.
+They show up in TradingView under Indicators, then Invite-only scripts. I switch them on by hand, so they can take up to 24 hours to appear. If they are not there after 24 hours, reply to this email and I will sort it.
 
 Questions? Reply to this email or write to {SUPPORT_EMAIL} and I will get you sorted.
 
@@ -2893,18 +2890,16 @@ SpyBeforeYouBuy"""
 If this landed in your spam or junk folder, move it to your inbox first - the links below will not work properly from spam.
 
 Step 1 - Join the private Telegram channel
-Tap your personal access link:
+Tap your personal link:
 {GATE_BASE}/agree/{code}
-It works once and it is tied to your subscription, so keep it to yourself.
+It works once and it is only for you - do not share it.
 
-Step 2 - Switch on your TradingView indicators
-Entered your TradingView username at checkout? You are already set - skip this step. If you skipped it, enter it here so I can switch your indicators on:
-{GATE_BASE}/tradingview
-If you do not have a TradingView account yet, make a free one at tradingview.com first, then enter your username at the same link.
+Step 2 - Turn on your TradingView indicators
+Did you enter your TradingView username when you paid? Then you are done - your indicators are being switched on.
+If not, tap this link and enter it now: {GATE_BASE}/tradingview
+No TradingView account yet? Make a free one at tradingview.com first, then enter your username at the same link.
 
-Your indicators appear in TradingView under Indicators, then Invite-only scripts.
-
-Your indicators are switched on by hand, so they can take up to 24 hours to appear under Invite-only scripts. If they are not there after 24 hours, reply to this email and I will sort it.
+They show up in TradingView under Indicators, then Invite-only scripts. I switch them on by hand, so they can take up to 24 hours to appear. If they are not there after 24 hours, reply to this email and I will sort it.
 
 Questions? Reply to this email or write to {SUPPORT_EMAIL} and I will get you sorted.
 
@@ -3227,13 +3222,19 @@ def email_test_welcome(payload: dict, key: str = ""):
             "WHERE email=?", (email,)).fetchone()
     finally:
         con.close()
-    if not row:
-        return JSONResponse({"detail": "no such subscriber"},
-                            status_code=404)
+    if row:
+        plan, status, invite = row[0], row[1], row[2]
+    else:
+        # No subscriber row (e.g. a wording-check render to the
+        # owner's test inbox): compose the standard Monthly trialing
+        # variant with a placeholder invite so the full layout can
+        # be eyeballed. Nothing is stamped either way.
+        plan, status, invite = "Monthly", "trialing", "https://t.me/+TEST"
     subject, body = _welcome_compose(
-        {"plan": row[0], "status": row[1], "invite_link": row[2]})
+        {"plan": plan, "status": status, "invite_link": invite})
     ok = _resend_send(email, "[TEST] " + subject, body)
-    return {"sent": ok, "to": email, "from": WELCOME_FROM}
+    return {"sent": ok, "to": email, "from": WELCOME_FROM,
+            "subject": "[TEST] " + subject, "body": body}
 
 
 @app.post("/email/send")
