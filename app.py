@@ -6164,6 +6164,38 @@ def _scripted_answer(q: str) -> str | None:
                 "or 15% off the first payment on Monthly, Quarterly "
                 "and Yearly. The banner on the site shows the "
                 "current one; if there is no banner, no promo is on.")
+    if (has("trial") or phrase("free week", "try it free",
+                               "try free")) and has(
+            "much", "price", "prices", "pricing", "cost"):
+        # Price and trial asked together (Nov 14 health check:
+        # "How much is the Monthly plan and does it have a free
+        # trial?" landed in the trial branch and never stated the
+        # price). Lead with the plan's price, then the trial facts.
+        if phrase("indicators only"):
+            return ("Indicators Only is $10/month, charged at "
+                    "checkout - the free trial is only on Monthly: "
+                    "3 days free, then $20/month, card required, "
+                    "one trial per person, ever.")
+        if has("quarterly"):
+            return ("Quarterly is $45/quarter, charged at "
+                    "checkout - the free trial is only on Monthly: "
+                    "3 days free, then $20/month, card required, "
+                    "one trial per person, ever.")
+        if has("yearly"):
+            return ("Yearly is $150/year, charged at checkout - "
+                    "the free trial is only on Monthly: 3 days "
+                    "free, then $20/month, card required, one "
+                    "trial per person, ever.")
+        if has("lifetime"):
+            return ("Lifetime is $500, one payment at checkout - "
+                    "the free trial is only on Monthly: 3 days "
+                    "free, then $20/month, card required, one "
+                    "trial per person, ever.")
+        return ("Monthly is $20/month, and it starts with a "
+                "3-day free trial - card required, one trial per "
+                "person, ever. You get everything in the "
+                "membership during the trial, and you can cancel "
+                "before the trial ends and never be charged.")
     if has("trial") or phrase("free week", "try it free", "try free"):
         return ("Monthly starts with a 3-day free trial - card "
                 "required, one trial per person, ever. If you have "
@@ -6383,7 +6415,22 @@ def _scripted_answer(q: str) -> str | None:
                 "trading day.")
     if has("price", "prices", "pricing", "cost", "much") or phrase(
             "how much", "what does it cost"):
-        return _PLANS_ANSWER
+        # A price question naming one plan leads with that plan's
+        # price as a sentence ("Monthly is $20/month."), then the
+        # full list - the Nov 14 health check asked for the price
+        # stated up front, not only inside the list.
+        lead = ""
+        if phrase("indicators only"):
+            lead = "Indicators Only is $10/month. "
+        elif has("monthly"):
+            lead = "Monthly is $20/month. "
+        elif has("quarterly"):
+            lead = "Quarterly is $45/quarter. "
+        elif has("yearly"):
+            lead = "Yearly is $150/year. "
+        elif has("lifetime"):
+            lead = "Lifetime is $500, one payment. "
+        return lead + _PLANS_ANSWER
     if has("plan", "plans", "subscription", "subscribe", "join",
            "membership") and has("get", "access", "after", "how",
                                  "want", "start"):
