@@ -2999,13 +2999,17 @@ def email_welcome_run(key: str = ""):
 REFERRAL_EMAIL_SUBJECT = "Your referral link"
 REF_EMAIL_STATUSES = ("active", "trialing", "lifetime")
 REF_EMAIL_TEST_SKIP = {"jgwwinnipeg@yahoo.com"}
-REF_EMAIL_DELAY_SECS = 24 * 3600
+# Referral links go out only after the member's refund window has
+# expired (Justin's order, Nov 18 2026): the window is 3 days from
+# the first charge.
+REFUND_WINDOW_SECS = 3 * 86400
 
 
 def _referral_email_compose(sub: dict) -> tuple[str, str]:
     """The referral follow-up email (Justin's order, Nov 13 2026):
-    one per member, about 24 hours after they join, carrying their
-    personal /ref/<code> link and the plain program explanation."""
+    one per member, sent only once their refund window has expired,
+    carrying their personal /ref/<code> link and the plain program
+    explanation."""
     code = sub.get("ref_code") or ""
     body = f"""Hi - here is your personal referral link:
 {GATE_BASE}/ref/{code}
@@ -3054,13 +3058,39 @@ def _stripe_mark_ref_email(sub_id, ts) -> bool:
         return False
 
 
+def _refund_window_end(sub_id, created_ts):
+    """Epoch when the member's refund window expires: 3 days after
+    the first charge. Paid upfront, the charge lands at signup.
+    Still trialing, there is no charge yet, so None. Converted from
+    a trial, the charge lands at trial_end. No subscription on file
+    (Lifetime), the one payment is at signup. None also when Stripe
+    cannot be read - fail closed, never send early."""
+    if not sub_id:
+        return (float(created_ts) + REFUND_WINDOW_SECS) \
+            if created_ts else None
+    try:
+        sub = _stripe_get(f"subscriptions/{sub_id}")
+    except Exception as e:
+        print(f"[email] refund-window check failed for {sub_id}: "
+              f"{e}", flush=True)
+        return None
+    if (sub.get("status") or "") == "trialing":
+        return None
+    charge_ts = sub.get("trial_end") or sub.get("created") \
+        or created_ts
+    if not charge_ts:
+        return None
+    return float(charge_ts) + REFUND_WINDOW_SECS
+
+
 @app.post("/email/referral-run")
 def email_referral_run(key: str = ""):
     """Keyed: send the one-time referral-link email to every member
-    in good standing whose subscription started at least 24 hours
-    ago and who has not been sent it yet. Sent once per member,
-    ever - the durable marker is the Stripe subscription metadata,
-    mirrored in the app record."""
+    in good standing whose refund window has expired (3 days from
+    the first charge; a trialing member's window starts when the
+    trial converts) and who has not been sent it yet. Sent once per
+    member, ever - the durable marker is the Stripe subscription
+    metadata, mirrored in the app record."""
     if not _key_ok(key):
         return JSONResponse({"detail": "not found"}, status_code=404)
     con = _subs_db()
@@ -3095,9 +3125,11 @@ def email_referral_run(key: str = ""):
                 skipped.append({"email": email,
                                 "reason": "no start date on file"})
                 continue
-            if now - created_ts < REF_EMAIL_DELAY_SECS:
-                skipped.append({"email": email,
-                                "reason": "under 24 hours old"})
+            win_end = _refund_window_end(sub_id, created_ts)
+            if win_end is None or now < win_end:
+                skipped.append(
+                    {"email": email,
+                     "reason": "refund window not expired"})
                 continue
             code = _ref_code(email)
             if not code or len(code) != 8:
