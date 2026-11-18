@@ -1819,6 +1819,30 @@ def promo_state():
         return {"active": False}
 
 
+@app.options("/promo/state")
+def promo_state_options():
+    """CORS preflight for the marketing site's cross-origin fetch
+    (fix Nov 18, 2026: without this the preflight got a 405 and every
+    browser blocked the fetch, so the promo banner never rendered)."""
+    return JSONResponse({}, status_code=200, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Max-Age": "86400",
+    })
+
+
+@app.middleware("http")
+async def _promo_state_cors(request, call_next):
+    """The marketing site (spybeforeyoubuytrading.com) fetches
+    /promo/state cross-origin. The endpoint is public and
+    non-sensitive, so allow any origin - on this route only."""
+    resp = await call_next(request)
+    if request.url.path == "/promo/state":
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
 @app.post("/promo/setup")
 def promo_setup(key: str = ""):
     """Keyed, idempotent: create the 10% and 15% first-payment
