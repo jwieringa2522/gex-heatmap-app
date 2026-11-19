@@ -6260,6 +6260,27 @@ def _scripted_answer(q: str) -> str | None:
                 "the membership during the trial, and you can cancel "
                 "before the trial ends and never be charged. The other "
                 "plans are charged at checkout.")
+    if phrase("billing link", "billing portal",
+              "manage my subscription", "manage subscription",
+              "manage my account", "update my card",
+              "change my card", "update my payment",
+              "change my payment", "update payment method",
+              "where is my billing", "my billing") or (
+            has("billing") and has(
+                "link", "page", "manage", "portal", "where",
+                "find")):
+        # Taught Nov 19 2026 from the learning loop ("where my
+        # billing link") - answer approved by Justin verbatim.
+        return ("You can manage or cancel your subscription from "
+                "the access page: go to "
+                "https://gex.spybeforeyoubuytrading.com/access and "
+                "click Manage or cancel my subscription - or go "
+                "straight to "
+                "https://gex.spybeforeyoubuytrading.com/manage and "
+                "enter the email you subscribed with. Cancelling "
+                "stops future charges, and your access runs to the "
+                "end of the period you have paid for, or to the end "
+                "of your trial.")
     if has("cancel", "cancelling", "cancellation"):
         return ("Yes, you can cancel anytime from your billing link. "
                 "Cancelling stops future charges, and your access runs "
