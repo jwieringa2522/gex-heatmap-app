@@ -4937,24 +4937,25 @@ async def cancel_feedback_submit(code: str, request: Request):
 # subscription and no completed payment, so no new-subscriber alert
 # ever fired for them (first case: Dennis Becker, Nov 10, Quarterly -
 # found by Justin in the dashboard). About 24 hours after the
-# attempt they get ONE email with a personal 20%-off-first-payment
-# code. Scope matches the promo program: Monthly / Quarterly /
+# attempt they get ONE email with a 20%-off-first-payment code.
+# Scope matches the promo program: Monthly / Quarterly /
 # Yearly first payment only (coupon restricted to the shared
 # membership product; Lifetime and Indicators Only links reject
-# codes anyway). Each code is created per person with a real
-# Stripe expires_at and max_redemptions=1, so the deadline in the
-# email is enforced by Stripe itself. Expiry was 7 days in the
-# original build; Justin cut it to 3 days later on Nov 14 2026 -
-# the first send (Dennis Becker, earlier that day) keeps the
-# 7 days his email promised; everyone after gets 3. The never-twice guard is a
+# codes anyway). The code was per-person in the original build
+# (BACK20 + 6 random chars, real Stripe expires_at - 7 days at
+# first, cut to 3 days later on Nov 14 2026; the first send,
+# Dennis Becker, keeps his personal code until its Nov 21
+# expiry). Justin replaced all that on Nov 19 2026: one shared
+# code, BACK20, no expiry, no redemption cap - the one-email-ever
+# rule is what keeps it to one use per person in practice. The never-twice guard is a
 # metadata stamp on the Stripe customer (sbyb_winback_sent_ts) -
 # durable across app redeploys, the welcome-email pattern. Run
 # daily by the site-winback-daily cron. Separate from the promo
 # machine (SAVE10/SAVE15) and from REF10; neither is touched here.
 WINBACK_TAG = "winback20"
+WINBACK_CODE = "BACK20"
 WINBACK_SINCE = 1793509200  # 2026-11-01 00:00 America/Winnipeg
 WINBACK_MIN_AGE_SECS = 24 * 3600
-WINBACK_CODE_TTL_SECS = 3 * 86400
 _WINBACK_COUPON_CACHE = {"id": None, "ts": 0.0}
 _WINBACK_AMOUNTS = {2000: "Monthly", 4500: "Quarterly",
                     15000: "Yearly"}
@@ -4982,7 +4983,8 @@ def _winback_coupon_id():
 def winback_setup(key: str = ""):
     """Keyed, idempotent: make sure the 20%-off-first-payment
     win-back coupon exists (duration once, restricted to the
-    membership product the M/Q/Y plans share)."""
+    membership product the M/Q/Y plans share) and the shared
+    BACK20 code exists on it, active."""
     if not _key_ok(key):
         return JSONResponse({"detail": "not found"}, status_code=404)
     if not STRIPE_SECRET_KEY:
@@ -4990,25 +4992,43 @@ def winback_setup(key: str = ""):
                             status_code=500)
     try:
         cid = _winback_coupon_id()
-        if cid:
-            return {"coupon": cid, "created": False}
+        created = False
         products = []
-        for p in PROMO_PLANS.values():
-            price = _stripe_get(f"prices/{p['price_id']}")
-            prod = price.get("product")
-            if prod and prod not in products:
-                products.append(prod)
-        fields = {
-            "percent_off": "20", "duration": "once",
-            "name": "Win-back - 20% off first payment",
-            "metadata[sbyb]": WINBACK_TAG}
-        for i, prod in enumerate(products):
-            fields[f"applies_to[products][{i}]"] = prod
-        coupon = _stripe_post("coupons", fields)
-        _WINBACK_COUPON_CACHE.update(
-            {"id": coupon.get("id"), "ts": time.time()})
-        return {"coupon": coupon.get("id"), "created": True,
-                "products": products}
+        if not cid:
+            for p in PROMO_PLANS.values():
+                price = _stripe_get(f"prices/{p['price_id']}")
+                prod = price.get("product")
+                if prod and prod not in products:
+                    products.append(prod)
+            fields = {
+                "percent_off": "20", "duration": "once",
+                "name": "Win-back - 20% off first payment",
+                "metadata[sbyb]": WINBACK_TAG}
+            for i, prod in enumerate(products):
+                fields[f"applies_to[products][{i}]"] = prod
+            coupon = _stripe_post("coupons", fields)
+            cid = coupon.get("id")
+            created = True
+            _WINBACK_COUPON_CACHE.update(
+                {"id": cid, "ts": time.time()})
+        # Shared code (Nov 19 2026): one BACK20 for everyone - no
+        # expiry, no redemption cap. Create it if missing; switch
+        # it back on if it was ever deactivated.
+        code_created = False
+        promo = _promo_find_code(WINBACK_CODE)
+        if not promo:
+            _stripe_post("promotion_codes", {
+                "promotion[type]": "coupon",
+                "promotion[coupon]": cid,
+                "code": WINBACK_CODE,
+                "metadata[sbyb]": WINBACK_TAG})
+            code_created = True
+        elif not promo.get("active"):
+            _stripe_post(f"promotion_codes/{promo['id']}",
+                         {"active": "true"})
+        return {"coupon": cid, "created": created,
+                "products": products, "code": WINBACK_CODE,
+                "code_created": code_created}
     except Exception as e:
         return JSONResponse({"detail": f"stripe error: {e}"},
                             status_code=502)
@@ -5176,7 +5196,7 @@ def _winback_compose(cand, code):
 
 {started}
 
-If you are still interested, here is 20% off your first payment: code {code}. It works on Monthly, Quarterly and Yearly, and it is good for 3 days.
+If you are still interested, here is 20% off your first payment: code {code}. It works on Monthly, Quarterly and Yearly.
 
 Finish signing up here: {link}
 
@@ -5187,7 +5207,7 @@ Any questions, just reply to this email.
 
 
 def _winback_send(cand):
-    """Create the personal code, send the email, stamp the
+    """Send the email with the shared BACK20 code, stamp the
     customer(s). Returns a result dict; never raises."""
     email = cand["email"]
     coupon_id = _winback_coupon_id()
@@ -5195,24 +5215,8 @@ def _winback_send(cand):
         return {"email": email, "ok": False,
                 "reason": "win-back coupon missing - run "
                           "winback setup"}
-    import secrets
-    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-    code = "BACK20" + "".join(
-        secrets.choice(alphabet) for _ in range(6))
+    code = WINBACK_CODE
     now = time.time()
-    try:
-        _stripe_post("promotion_codes", {
-            "promotion[type]": "coupon",
-            "promotion[coupon]": coupon_id,
-            "code": code,
-            "expires_at": str(int(now + WINBACK_CODE_TTL_SECS)),
-            "max_redemptions": "1",
-            "metadata[sbyb]": WINBACK_TAG,
-            "metadata[customer]": cand["customer_ids"][0],
-            "metadata[email]": email})
-    except Exception as e:
-        return {"email": email, "ok": False,
-                "reason": f"code creation failed: {e}"}
     subject, body = _winback_compose(cand, code)
     if not _resend_send(email, subject, body):
         return {"email": email, "ok": False,
