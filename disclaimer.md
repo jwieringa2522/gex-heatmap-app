@@ -187,9 +187,10 @@ Monthly plan starts with a 3-day free trial, and a payment card is required
 to start it; cancel during the trial and you pay nothing. The free trial is
 one per person, ever - if you have used a free trial before, a new Monthly
 subscription starts as a paid subscription right away. Refunds are limited
-to one per person, ever: a first purchase is refundable within 3 days of
-the charge, and nothing is refundable after that. Renewals and the Lifetime
-plan are final. Cancelling stops future charges; access
+to one per person, ever: a first purchase of Monthly, Quarterly or Yearly
+is refundable within 3 days of
+the charge, and nothing is refundable after that. Renewals are final.
+Lifetime is a final sale - no refunds and no promo codes. Cancelling stops future charges; access
 continues to the end of the paid or trial period.
 
 ## 16. FORWARD-LOOKING STATEMENTS
