@@ -1742,7 +1742,7 @@ def stripe_referral_setup(key: str = ""):
 # so a redeploy cannot resurrect or lose a promo. The site banner
 # reads the public GET /promo/state; the site-promo-machine cron
 # flips codes through the keyed endpoints below.
-PROMO_CODES = {10: "SAVE10", 15: "SAVE15"}
+PROMO_CODES = {10: "SAVE10", 15: "SAVE15", 20: "SAVE20"}
 PROMO_PLANS = {
     "monthly": {
         "link_id": "plink_1UWiKEAK6giYlerxHKeQ984B",
