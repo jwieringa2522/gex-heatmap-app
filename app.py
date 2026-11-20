@@ -4932,6 +4932,86 @@ async def cancel_feedback_submit(code: str, request: Request):
     return ACCESS_PAGE.replace("__BODY__", body)
 
 
+@app.post("/stripe/goodwill-refund")
+def stripe_goodwill_refund(payload: dict, key: str = ""):
+    """Keyed, single-purpose: the b_gouda one-off (Justin's order,
+    Nov 19 2026). His $500 Lifetime charge ran under a site-wide
+    SAVE20 banner that never said Lifetime was excluded, so he
+    gets the 20% ($100) back as a PARTIAL refund - but only once
+    the payment has actually landed in the Stripe account (the
+    support email promised that sequencing). The tracking cron
+    calls this until it executes. Guards: the session's Stripe
+    email must match, the charge must be exactly the expected
+    amount and succeeded, and an existing refund at/above the
+    amount reports already_refunded instead of paying twice. The
+    partial refund fires charge.refunded, which stamps his
+    one-refund-ever flag - expected and accepted for this
+    one-off."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    session_id = (payload.get("session_id") or "").strip()
+    email = (payload.get("email") or "").strip().lower()
+    amount = int(payload.get("amount_cents") or 0)
+    charge_amount = int(payload.get("charge_cents") or 0)
+    if not session_id.startswith("cs_") or not email or amount <= 0 \
+            or charge_amount <= 0:
+        return JSONResponse({"detail": "session_id, email, "
+                             "amount_cents, charge_cents required"},
+                            status_code=400)
+    try:
+        session = _stripe_get(f"checkout/sessions/{session_id}")
+        s_email = ((session.get("customer_details") or {}).get("email")
+                   or session.get("customer_email")
+                   or "").strip().lower()
+        if s_email != email:
+            return {"state": "refused",
+                    "reason": "session email mismatch"}
+        pi_id = session.get("payment_intent")
+        if not pi_id:
+            return {"state": "unknown",
+                    "reason": "session has no payment_intent"}
+        pi = _stripe_get(f"payment_intents/{pi_id}")
+        charge_id = pi.get("latest_charge")
+        if not charge_id:
+            return {"state": "unknown",
+                    "reason": "payment intent has no charge"}
+        charge = _stripe_get(f"charges/{charge_id}")
+    except Exception as e:
+        return {"state": "unknown",
+                "reason": f"stripe read failed: {e}"}
+    if charge.get("status") != "succeeded" \
+            or int(charge.get("amount") or 0) != charge_amount:
+        return {"state": "refused",
+                "reason": "charge is not the expected succeeded "
+                          "charge"}
+    if int(charge.get("amount_refunded") or 0) >= amount:
+        return {"state": "already_refunded", "charge": charge_id}
+    available_on = None
+    bt_id = charge.get("balance_transaction")
+    if bt_id:
+        try:
+            bt = _stripe_get(f"balance_transactions/{bt_id}")
+            available_on = bt.get("available_on")
+        except Exception as e:
+            return {"state": "unknown",
+                    "reason": f"balance transaction unreadable: {e}"}
+    if available_on and int(available_on) > int(time.time()):
+        return {"state": "pending", "charge": charge_id,
+                "available_on": int(available_on)}
+    try:
+        refund = _stripe_post("refunds", {
+            "charge": charge_id, "amount": str(amount),
+            "metadata[sbyb]": "goodwill_save20",
+            "metadata[email]": email})
+    except Exception as e:
+        return {"state": "unknown",
+                "reason": f"refund creation failed: {e}"}
+    print(f"[stripe] goodwill refund {refund.get('id')} "
+          f"({amount} cents) on {charge_id} for {email}", flush=True)
+    return {"state": "refunded", "charge": charge_id,
+            "refund": refund.get("id"), "amount_cents": amount}
+
+
 # ---------- win-back offers for abandoned checkouts (Nov 14 2026) ----------
 # A Stripe customer who started checkout and never finished has no
 # subscription and no completed payment, so no new-subscriber alert
