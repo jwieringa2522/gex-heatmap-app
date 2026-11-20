@@ -190,7 +190,7 @@ subscription starts as a paid subscription right away. Refunds are limited
 to one per person, ever: a first purchase of Monthly, Quarterly or Yearly
 is refundable within 3 days of
 the charge, and nothing is refundable after that. Renewals are final.
-Lifetime is a final sale - no refunds and no promo codes. Cancelling stops future charges; access
+Lifetime is a final sale - no refunds. Cancelling stops future charges; access
 continues to the end of the paid or trial period.
 
 ## 16. FORWARD-LOOKING STATEMENTS

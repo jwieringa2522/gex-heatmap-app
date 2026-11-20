@@ -1735,9 +1735,12 @@ def stripe_referral_setup(key: str = ""):
 
 # ---------- recurring random promos (Justin's program, Nov 13 2026) ----------
 # Every other week, one promo: 10% or 15% off the FIRST payment on
-# Monthly, Quarterly and Yearly (duration=once coupons restricted to
-# those plans' products). Lifetime and Indicators Only are excluded;
-# the referral REF10 path is separate and untouched. Stripe itself is
+# Monthly, Quarterly, Yearly and Lifetime (duration=once coupons
+# restricted to the shared membership product; plan scope is set by
+# which Payment Links accept codes). Indicators Only is excluded;
+# Lifetime joined the program on Justin's order Nov 20 2026 (it
+# stays final sale on refunds - promos only). The referral REF10
+# path is separate and untouched. Stripe itself is
 # the state store (promotion code active flag + expires_at backstop),
 # so a redeploy cannot resurrect or lose a promo. The site banner
 # reads the public GET /promo/state; the site-promo-machine cron
@@ -1756,6 +1759,10 @@ PROMO_PLANS = {
         "link_id": "plink_1UWiMLAK6giYlerxVA0WjXF1",
         "price_id": "price_1UWiGQAK6giYlerxTHlDrB38",
         "url": "https://buy.stripe.com/3cIfZg6YK0EbdEc5dhcs802"},
+    "lifetime": {
+        "link_id": "plink_1UWiNIAK6giYlerxqVSiaUfY",
+        "price_id": "price_1UWiGQAK6giYlerxyHEKdkzE",
+        "url": "https://buy.stripe.com/aFaaEWbf04Ur7fO0X1cs803"},
 }
 _PROMO_STATE_CACHE = {"data": None, "ts": 0.0}
 
@@ -1846,9 +1853,10 @@ async def _promo_state_cors(request, call_next):
 @app.post("/promo/setup")
 def promo_setup(key: str = ""):
     """Keyed, idempotent: create the 10% and 15% first-payment
-    coupons (restricted to the Monthly/Quarterly/Yearly products),
+    coupons (restricted to the shared membership product),
     their SAVE10/SAVE15 promotion codes (created inactive), and make
-    the three plan Payment Links accept promotion codes."""
+    the plan Payment Links (Monthly/Quarterly/Yearly/Lifetime)
+    accept promotion codes."""
     if not _key_ok(key):
         return JSONResponse({"detail": "not found"}, status_code=404)
     if not STRIPE_SECRET_KEY:
@@ -6072,14 +6080,14 @@ _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
   first 3 days of a first purchase of Monthly, Quarterly or Yearly
   only. After that window, or if
   you have already had a refund, all sales are final; renewals are
-  always final. Lifetime is a final sale - no refunds and no
-  promo codes. Cancelling during the free trial
+  always final. Lifetime is a final sale - no refunds.
+  Cancelling during the free trial
   means the member is never charged, so there is nothing to
   refund; the 3-day refund window runs from the first charge,
   when the trial converts. Refunds and cancellations are only
   ever processed by email to the support address, never in chat.
 - Promos run from time to time for a few days - 10 or 15% off the
-  first payment on Monthly, Quarterly and Yearly. The banner on
+  first payment on Monthly, Quarterly, Yearly and Lifetime. The banner on
   the site shows the current one; if there is no banner, no promo
   is on. Never state that a specific promo is live unless the
   scripted answer layer has said so.
@@ -6303,8 +6311,8 @@ def _scripted_answer(q: str) -> str | None:
                 "so it does not renew again, and your access runs "
                 "to the end of the period you paid for.")
     if is_refund and has("lifetime"):
-        return ("Lifetime is a final sale - no refunds and no "
-                "promo codes. The 3-day refund window applies to "
+        return ("Lifetime is a final sale - no refunds. "
+                "The 3-day refund window applies to "
                 "first purchases of Monthly, Quarterly and Yearly "
                 "only, and it is one refund per person, ever.")
     if is_refund and phrase(
@@ -6329,7 +6337,7 @@ def _scripted_answer(q: str) -> str | None:
                 "per person, ever. Ask within 3 days of the "
                 "charge and it is refunded in full. After that window, "
                 "renewals are final, and Lifetime is a final sale - "
-                "no refunds and no promo codes. Monthly also starts "
+                "no refunds. Monthly also starts "
                 "with a 3-day free trial, so you can try everything "
                 "before ever being charged.")
     if has("promo", "promotion", "discount", "coupon") or phrase(
@@ -6350,15 +6358,17 @@ def _scripted_answer(q: str) -> str | None:
                 ).strftime("%b %-d") + ".")
             return (f"Yes - a promo is on right now: "
                     f"{_ps['percent']}% off your first payment on "
-                    f"Monthly, Quarterly or Yearly with the code "
+                    f"Monthly, Quarterly, Yearly or Lifetime with "
+                    f"the code "
                     f"{_ps['code']}.{_end} The banner on the site "
                     f"links straight to checkout with the code "
-                    f"applied. Lifetime and Indicators Only are not "
+                    f"applied. Only Indicators Only is not "
                     f"part of it.")
         return ("Promos run from time to time for a few days - 10 "
-                "or 15% off the first payment on Monthly, Quarterly "
-                "and Yearly. The banner on the site shows the "
-                "current one; if there is no banner, no promo is on.")
+                "or 15% off the first payment on Monthly, Quarterly, "
+                "Yearly and Lifetime. The banner on the site shows "
+                "the current one; if there is no banner, no promo "
+                "is on.")
     if (has("trial") or phrase("free week", "try it free",
                                "try free")) and has(
             "much", "price", "prices", "pricing", "cost"):
