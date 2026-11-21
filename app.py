@@ -1745,7 +1745,7 @@ def stripe_referral_setup(key: str = ""):
 # so a redeploy cannot resurrect or lose a promo. The site banner
 # reads the public GET /promo/state; the site-promo-machine cron
 # flips codes through the keyed endpoints below.
-PROMO_CODES = {10: "SAVE10", 15: "SAVE15", 20: "SAVE20"}
+PROMO_CODES = {10: "SAVE10", 15: "SAVE15", 20: "SAVE20", 25: "SAVE25"}
 PROMO_PLANS = {
     "monthly": {
         "link_id": "plink_1UWiKEAK6giYlerxHKeQ984B",
@@ -1852,11 +1852,11 @@ async def _promo_state_cors(request, call_next):
 
 @app.post("/promo/setup")
 def promo_setup(key: str = ""):
-    """Keyed, idempotent: create the 10% and 15% first-payment
-    coupons (restricted to the shared membership product),
-    their SAVE10/SAVE15 promotion codes (created inactive), and make
-    the plan Payment Links (Monthly/Quarterly/Yearly/Lifetime)
-    accept promotion codes."""
+    """Keyed, idempotent: create the first-payment coupons for
+    every percent in PROMO_CODES (restricted to the shared
+    membership product), their promotion codes (created inactive),
+    and make the plan Payment Links (Monthly/Quarterly/Yearly/
+    Lifetime) accept promotion codes."""
     if not _key_ok(key):
         return JSONResponse({"detail": "not found"}, status_code=404)
     if not STRIPE_SECRET_KEY:
@@ -1927,7 +1927,7 @@ def promo_activate(payload: dict, key: str = ""):
     ends_at = payload.get("ends_at")
     if pct not in PROMO_CODES or not ends_at:
         return JSONResponse(
-            {"detail": "percent (10 or 15) and ends_at required"},
+            {"detail": "percent (one of PROMO_CODES) and ends_at required"},
             status_code=400)
     try:
         for p2, code_str in PROMO_CODES.items():
