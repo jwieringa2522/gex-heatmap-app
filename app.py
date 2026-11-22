@@ -1086,6 +1086,49 @@ def _set_invoice_footer(con, email, invite):
               flush=True)
 
 
+def _footer_backfill():
+    """One-pass backfill (Nov 22 2026): set the invoice footer for
+    every existing member who has a Stripe customer id and a personal
+    invite on file, then read each customer back from Stripe and
+    verify the footer landed verbatim. The dashboard exposes no
+    per-customer footer field, so this API pass is the only route.
+    Returns one result dict per row."""
+    results = []
+    con = _subs_db()
+    try:
+        rows = con.execute(
+            "SELECT email, plan, stripe_customer_id, invite_link "
+            "FROM site_subs ORDER BY created_ts").fetchall()
+    finally:
+        con.close()
+    for email, plan, cid, invite in rows:
+        if plan == IO_PLAN:
+            results.append({"email": email, "set": False,
+                            "reason": "indicators only - no invite"})
+            continue
+        if not invite:
+            results.append({"email": email, "set": False,
+                            "reason": "no invite on file"})
+            continue
+        if not cid:
+            results.append({"email": email, "set": False,
+                            "reason": "no stripe customer id on file"})
+            continue
+        want = INVOICE_FOOTER_TEMPLATE.format(link=invite)
+        try:
+            _stripe_post(f"customers/{cid}",
+                         {"invoice_settings[footer]": want})
+            cust = _stripe_get(f"customers/{cid}")
+            got = ((cust.get("invoice_settings") or {})
+                   .get("footer") or "")
+            results.append({"email": email, "set": True,
+                            "readback_ok": got == want})
+        except Exception as e:
+            results.append({"email": email, "set": False,
+                            "reason": f"stripe error: {e}"[:200]})
+    return results
+
+
 def _stripe_sub_period_end(sub_id):
     """Fetch a subscription from the Stripe API and return its
     current period end - top level, or items[0] on newer API versions
@@ -2862,6 +2905,20 @@ def dashboard(key: str = ""):
         "X-Robots-Tag": "noindex, nofollow",
         "Cache-Control": "no-store"})
 
+
+
+@app.post("/stripe/footer-backfill")
+def stripe_footer_backfill(key: str = ""):
+    """Keyed one-pass backfill: set + verify the personal Telegram
+    link invoice footer on every member's Stripe customer record
+    (see _footer_backfill). Idempotent - safe to re-run. Same key
+    guard as /stripe/subs."""
+    if not SITE_SUBS_READ_KEY or not hmac.compare_digest(
+            key, SITE_SUBS_READ_KEY):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY or SBYB_TEST_MODE:
+        return {"results": [], "error": "stripe not configured"}
+    return {"results": _footer_backfill()}
 
 
 @app.post("/stripe/repair-invite")
