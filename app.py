@@ -1049,7 +1049,41 @@ def _ensure_invite(con, email):
         con.execute(
             "UPDATE site_subs SET invite_link=?, updated_ts=? "
             "WHERE email=?", (invite, time.time(), email))
+        _set_invoice_footer(con, email, invite)
     return invite
+
+
+INVOICE_FOOTER_TEMPLATE = (
+    "Your SpyBeforeYouBuy access: join the Telegram channel with your "
+    "personal link: {link} - your welcome email from "
+    "support@spybeforeyoubuytrading.com has your full access details "
+    "(check your junk folder if it is not in your inbox).")
+
+
+def _set_invoice_footer(con, email, invite):
+    """Best-effort (Justin's order, Nov 22 2026): print the member's
+    personal Telegram link on their Stripe invoices by setting
+    invoice_settings.footer on their customer record, so a member
+    who never sees the welcome email (junk folder) still gets the
+    link on Stripe's own invoice email. Runs when an invite is first
+    minted. Never raises - a footer failure must not break checkout,
+    self-heal or invite repair."""
+    if not STRIPE_SECRET_KEY or SBYB_TEST_MODE or not invite:
+        return
+    row = con.execute(
+        "SELECT stripe_customer_id FROM site_subs WHERE email=?",
+        (email,)).fetchone()
+    cid = row[0] if row else None
+    if not cid:
+        return
+    try:
+        _stripe_post(f"customers/{cid}", {
+            "invoice_settings[footer]":
+                INVOICE_FOOTER_TEMPLATE.format(link=invite)})
+        print(f"[stripe] invoice footer set for {email}", flush=True)
+    except Exception as e:
+        print(f"[stripe] invoice footer failed for {email}: {e}",
+              flush=True)
 
 
 def _stripe_sub_period_end(sub_id):
