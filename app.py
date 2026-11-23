@@ -1396,6 +1396,13 @@ _GUIDE_LINE = (
     "Read the step-by-step guide.</a></div>")
 
 
+_JUNK_NOTE = (
+    '<div class="small">After you check out, I email your personal '
+    "Telegram invite link within a few minutes. If it is not in "
+    "your inbox, check your junk or spam folder - it comes from "
+    "SpyBeforeYouBuy (support@spybeforeyoubuytrading.com).</div>")
+
+
 def _access_steps(tv_note=""):
     """The two simple steps every full-plan buyer follows - email
     first (that path survives a lost tab), TradingView second. Copy
@@ -1487,11 +1494,13 @@ def access_page(session_id: str = ""):
                   f"Manage or upgrade my subscription</a></div>"
                   if STRIPE_PORTAL_URL else "")
         body = ('<div class="big">You are in.</div>'
+                f"{_JUNK_NOTE}"
                 f"{personal}{_access_steps(tv_note)}{portal}"
                 f"{_MANAGE_LINE}"
                 f"{_referral_block(row[0])}")
     else:
         body = ('<div class="big">Almost there.</div>'
+                f"{_JUNK_NOTE}"
                 f"{_access_steps()}{_MANAGE_LINE}")
     return ACCESS_PAGE.replace("__BODY__", body)
 
