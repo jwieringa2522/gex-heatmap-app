@@ -1049,7 +1049,84 @@ def _ensure_invite(con, email):
         con.execute(
             "UPDATE site_subs SET invite_link=?, updated_ts=? "
             "WHERE email=?", (invite, time.time(), email))
+        _set_invoice_footer(con, email, invite)
     return invite
+
+
+INVOICE_FOOTER_TEMPLATE = (
+    "Your SpyBeforeYouBuy access: join the Telegram channel with your "
+    "personal link: {link} - your welcome email from "
+    "support@spybeforeyoubuytrading.com has your full access details "
+    "(check your junk folder if it is not in your inbox).")
+
+
+def _set_invoice_footer(con, email, invite):
+    """Best-effort (Justin's order, Nov 22 2026): print the member's
+    personal Telegram link on their Stripe invoices by setting
+    invoice_settings.footer on their customer record, so a member
+    who never sees the welcome email (junk folder) still gets the
+    link on Stripe's own invoice email. Runs when an invite is first
+    minted. Never raises - a footer failure must not break checkout,
+    self-heal or invite repair."""
+    if not STRIPE_SECRET_KEY or SBYB_TEST_MODE or not invite:
+        return
+    row = con.execute(
+        "SELECT stripe_customer_id FROM site_subs WHERE email=?",
+        (email,)).fetchone()
+    cid = row[0] if row else None
+    if not cid:
+        return
+    try:
+        _stripe_post(f"customers/{cid}", {
+            "invoice_settings[footer]":
+                INVOICE_FOOTER_TEMPLATE.format(link=invite)})
+        print(f"[stripe] invoice footer set for {email}", flush=True)
+    except Exception as e:
+        print(f"[stripe] invoice footer failed for {email}: {e}",
+              flush=True)
+
+
+def _footer_backfill():
+    """One-pass backfill (Nov 22 2026): set the invoice footer for
+    every existing member who has a Stripe customer id and a personal
+    invite on file, then read each customer back from Stripe and
+    verify the footer landed verbatim. The dashboard exposes no
+    per-customer footer field, so this API pass is the only route.
+    Returns one result dict per row."""
+    results = []
+    con = _subs_db()
+    try:
+        rows = con.execute(
+            "SELECT email, plan, stripe_customer_id, invite_link "
+            "FROM site_subs ORDER BY created_ts").fetchall()
+    finally:
+        con.close()
+    for email, plan, cid, invite in rows:
+        if plan == IO_PLAN:
+            results.append({"email": email, "set": False,
+                            "reason": "indicators only - no invite"})
+            continue
+        if not invite:
+            results.append({"email": email, "set": False,
+                            "reason": "no invite on file"})
+            continue
+        if not cid:
+            results.append({"email": email, "set": False,
+                            "reason": "no stripe customer id on file"})
+            continue
+        want = INVOICE_FOOTER_TEMPLATE.format(link=invite)
+        try:
+            _stripe_post(f"customers/{cid}",
+                         {"invoice_settings[footer]": want})
+            cust = _stripe_get(f"customers/{cid}")
+            got = ((cust.get("invoice_settings") or {})
+                   .get("footer") or "")
+            results.append({"email": email, "set": True,
+                            "readback_ok": got == want})
+        except Exception as e:
+            results.append({"email": email, "set": False,
+                            "reason": f"stripe error: {e}"[:200]})
+    return results
 
 
 def _stripe_sub_period_end(sub_id):
@@ -2847,6 +2924,20 @@ def dashboard(key: str = ""):
         "X-Robots-Tag": "noindex, nofollow",
         "Cache-Control": "no-store"})
 
+
+
+@app.post("/stripe/footer-backfill")
+def stripe_footer_backfill(key: str = ""):
+    """Keyed one-pass backfill: set + verify the personal Telegram
+    link invoice footer on every member's Stripe customer record
+    (see _footer_backfill). Idempotent - safe to re-run. Same key
+    guard as /stripe/subs."""
+    if not SITE_SUBS_READ_KEY or not hmac.compare_digest(
+            key, SITE_SUBS_READ_KEY):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if not STRIPE_SECRET_KEY or SBYB_TEST_MODE:
+        return {"results": [], "error": "stripe not configured"}
+    return {"results": _footer_backfill()}
 
 
 @app.post("/stripe/repair-invite")
