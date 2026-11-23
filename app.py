@@ -1397,10 +1397,20 @@ _GUIDE_LINE = (
 
 
 _JUNK_NOTE = (
-    '<div class="small">After you check out, I email your personal '
-    "Telegram invite link within a few minutes. If it is not in "
-    "your inbox, check your junk or spam folder - it comes from "
-    "SpyBeforeYouBuy (support@spybeforeyoubuytrading.com).</div>")
+    '<div style="max-width:640px;margin:18px auto 0;background:#f2f5f4;'
+    "border:1px solid #e0e8e6;border-radius:12px;padding:12px 16px;"
+    "font-size:12.5px;line-height:1.55;color:#5c6b68;display:flex;"
+    'gap:10px;align-items:flex-start;text-align:left">'
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="#1f9d74" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true" '
+    'style="flex:none;margin-top:1px"><rect x="2" y="4" width="20" '
+    'height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>'
+    "<span>After you check out, I email your personal Telegram "
+    "invite link within a few minutes. If it is not in your inbox, "
+    '<strong style="color:#14201e">check your junk or spam '
+    "folder</strong> - it comes from SpyBeforeYouBuy "
+    "(support@spybeforeyoubuytrading.com).</span></div>")
 
 
 def _access_steps(tv_note=""):
