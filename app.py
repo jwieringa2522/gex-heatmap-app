@@ -2941,6 +2941,241 @@ def stripe_footer_backfill(key: str = ""):
     return {"results": _footer_backfill()}
 
 
+# ------------------------------------------------------------------
+# Free SPY Gamma Levels email list (Nov 23 2026). A free tier that
+# drives traffic to the marketing site: a visitor signs up with an
+# email and every trading day gets TODAY'S SPY gamma levels only -
+# reference price, call wall, put wall, gamma flip. NEVER the read,
+# NEVER QQQ - those stay members-only in the full premarket brief
+# (Justin's hard line). Rows live in usage.db, which wipes on every
+# redeploy, so the VM mirrors them (site_sync free-levels pass) and
+# restores missing rows through /free-levels/restore, the same
+# pattern as Lifetime subs. Unsubscribes ride the mirror too: the
+# active flag is part of the row, so active=0 survives a restore.
+
+FREE_LEVELS_COLS = ("email", "ts", "source", "unsub_token", "active")
+
+
+def _fl_db():
+    con = _db()
+    con.execute("""CREATE TABLE IF NOT EXISTS free_levels(
+        email TEXT PRIMARY KEY,
+        ts REAL, source TEXT, unsub_token TEXT,
+        active INTEGER DEFAULT 1)""")
+    return con
+
+
+def _fl_email_ok(email: str) -> bool:
+    if not email or len(email) > 254 or " " in email:
+        return False
+    if email.count("@") != 1:
+        return False
+    local, domain = email.split("@")
+    return bool(local) and "." in domain and not domain.startswith(".") \
+        and not domain.endswith(".")
+
+
+def _fl_unsub_link(email: str, token: str) -> str:
+    from urllib.parse import quote
+    return (f"{GATE_BASE}/free-levels/unsubscribe"
+            f"?e={quote(email)}&t={quote(token or '')}")
+
+
+@app.post("/free-levels/signup")
+def free_levels_signup(payload: dict):
+    """Public: join the free SPY gamma levels email list. Body
+    {email, source}. A duplicate signup is a success with no
+    duplicate row; a fresh signup on an unsubscribed address
+    reactivates it (the newest explicit opt-in wins)."""
+    email = (payload.get("email") or "").strip().lower()
+    if not _fl_email_ok(email):
+        return JSONResponse({"ok": False, "detail": "invalid email"},
+                            status_code=400)
+    source = (payload.get("source") or "").strip()[:64] or None
+    con = _fl_db()
+    try:
+        row = con.execute(
+            "SELECT email FROM free_levels WHERE email=?",
+            (email,)).fetchone()
+        if row is None:
+            token = hashlib.sha256(
+                (email + ":" + os.urandom(16).hex()).encode()
+            ).hexdigest()[:32]
+            con.execute(
+                "INSERT INTO free_levels(email, ts, source,"
+                " unsub_token, active) VALUES(?,?,?,?,1)",
+                (email, time.time(), source, token))
+        else:
+            con.execute(
+                "UPDATE free_levels SET active=1 WHERE email=?",
+                (email,))
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True}
+
+
+@app.get("/free-levels/unsubscribe", response_class=HTMLResponse)
+def free_levels_unsubscribe(e: str = "", t: str = ""):
+    """Public: one-click unsubscribe from the free levels email.
+    The token must match the row's stored token; anything else
+    gets the same neutral page and changes nothing."""
+    email = (e or "").strip().lower()
+    done = False
+    if email and t:
+        con = _fl_db()
+        try:
+            row = con.execute(
+                "SELECT unsub_token FROM free_levels WHERE email=?",
+                (email,)).fetchone()
+            if row and row[0] and hmac.compare_digest(t, row[0]):
+                con.execute(
+                    "UPDATE free_levels SET active=0 WHERE email=?",
+                    (email,))
+                con.commit()
+                done = True
+        finally:
+            con.close()
+    msg = ("You are unsubscribed. You will not get the free SPY "
+           "gamma levels email anymore." if done else
+           "That unsubscribe link does not look right. If you keep "
+           "getting the email, reply to it and I will take you off.")
+    return HTMLResponse(
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<title>SpyBeforeYouBuy</title></head>"
+        "<body style='font-family:sans-serif;background:#04090a;"
+        "color:#e8f0f0;text-align:center;padding:60px 20px'>"
+        f"<p style='font-size:18px'>{msg}</p>"
+        "<p><a style='color:#2dd4bf' "
+        "href='https://spybeforeyoubuytrading.com'>"
+        "spybeforeyoubuytrading.com</a></p></body></html>")
+
+
+@app.get("/free-levels/list")
+def free_levels_list(key: str = ""):
+    """Keyed: every free-levels row (email, ts, source, active,
+    unsub_token) so the VM can mirror the list. Same key guard as
+    /stripe/subs."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _fl_db()
+    try:
+        rows = con.execute(
+            f"SELECT {','.join(FREE_LEVELS_COLS)} FROM free_levels"
+            " ORDER BY ts").fetchall()
+    finally:
+        con.close()
+    return {"rows": [dict(zip(FREE_LEVELS_COLS, r)) for r in rows]}
+
+
+@app.post("/free-levels/restore")
+def free_levels_restore(payload: dict, key: str = ""):
+    """Keyed recovery: put back free-levels rows the VM mirror
+    holds that this (freshly wiped) database is missing. Missing
+    rows only - an existing row is never overwritten, so a live
+    unsubscribe or re-signup always wins over the snapshot."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    restored = 0
+    con = _fl_db()
+    try:
+        for row in payload.get("rows") or []:
+            email = (row.get("email") or "").strip().lower()
+            if not _fl_email_ok(email):
+                continue
+            cur = con.execute(
+                """INSERT OR IGNORE INTO free_levels(
+                    email, ts, source, unsub_token, active)
+                    VALUES(?,?,?,?,?)""",
+                (email, row.get("ts"), row.get("source"),
+                 row.get("unsub_token"),
+                 0 if row.get("active") in (0, False) else 1))
+            restored += cur.rowcount or 0
+        con.commit()
+    finally:
+        con.close()
+    return {"restored": restored}
+
+
+@app.post("/free-levels/delete")
+def free_levels_delete(payload: dict, key: str = ""):
+    """Keyed teardown: delete one free-levels row by email (test
+    cleanup; the VM mirror copy must be scrubbed separately, same
+    discipline as subscriber test rows)."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    email = (payload.get("email") or "").strip().lower()
+    if not email:
+        return JSONResponse({"detail": "email required"},
+                            status_code=400)
+    con = _fl_db()
+    try:
+        cur = con.execute("DELETE FROM free_levels WHERE email=?",
+                          (email,))
+        con.commit()
+        deleted = bool(cur.rowcount)
+    finally:
+        con.close()
+    return {"email": email, "deleted": deleted}
+
+
+@app.post("/free-levels/send")
+def free_levels_send(payload: dict, key: str = ""):
+    """Keyed: send today's free SPY gamma levels email to every
+    ACTIVE free-levels row, one send per recipient so each email
+    carries its own unsubscribe link. Body {date, spy_price,
+    call_wall, put_wall, gamma_flip}. Levels only - the locked
+    template below has no read and no QQQ, ever."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    vals = {}
+    for f in ("spy_price", "call_wall", "put_wall", "gamma_flip"):
+        v = payload.get(f)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return JSONResponse({"detail": f"{f} required"},
+                                status_code=400)
+        vals[f] = (f"{float(v):.2f}" if isinstance(v, (int, float))
+                   else str(v).strip())
+    from datetime import datetime as _dt, timezone as _tz
+    date_txt = (payload.get("date") or "").strip()
+    try:
+        d = _dt.strptime(date_txt, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        d = _dt.now(_tz.utc)
+    subject = (f"Today's SPY gamma levels - "
+               f"{d.strftime('%b')} {d.day}")
+    con = _fl_db()
+    try:
+        rows = con.execute(
+            "SELECT email, unsub_token FROM free_levels"
+            " WHERE active=1 ORDER BY ts").fetchall()
+    finally:
+        con.close()
+    sent = skipped = 0
+    for email, token in rows:
+        body = (
+            "Here are today's SPY gamma levels, from this "
+            "morning's brief:\n\n"
+            f"SPY reference: ${vals['spy_price']}\n"
+            f"Call wall (ceiling): ${vals['call_wall']}\n"
+            f"Put wall (floor): ${vals['put_wall']}\n"
+            f"Gamma flip: ${vals['gamma_flip']}\n\n"
+            "Members got the full brief before the open - the "
+            "read on what these levels mean, the QQQ levels, and "
+            "the day's plan. Your first look is free: start a "
+            "3-day free trial at "
+            "https://spybeforeyoubuytrading.com\n\n"
+            "SpyBeforeYouBuy\n\n"
+            "You are getting this because you signed up for free "
+            "SPY gamma levels at spybeforeyoubuytrading.com. "
+            f"Unsubscribe: {_fl_unsub_link(email, token)}")
+        if _resend_send(email, subject, body):
+            sent += 1
+        else:
+            skipped += 1
+    return {"sent": sent, "skipped": skipped}
+
+
 @app.post("/stripe/repair-invite")
 def stripe_repair_invite(payload: dict, key: str = ""):
     """Keyed repair: mint and store a missing Telegram invite for one
