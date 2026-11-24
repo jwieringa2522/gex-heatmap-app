@@ -2962,6 +2962,10 @@ def _fl_db():
         email TEXT PRIMARY KEY,
         ts REAL, source TEXT, unsub_token TEXT,
         active INTEGER DEFAULT 1)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS free_levels_cache(
+        id INTEGER PRIMARY KEY,
+        date TEXT, spy_price TEXT, call_wall TEXT, put_wall TEXT,
+        gamma_flip TEXT, chart_png_base64 TEXT)""")
     return con
 
 
@@ -2981,12 +2985,127 @@ def _fl_unsub_link(email: str, token: str) -> str:
             f"?e={quote(email)}&t={quote(token or '')}")
 
 
+# Latest-levels cache (Nov 23 2026): the most recent daily send's
+# payload, kept so a brand-new signup can be emailed the levels
+# instantly instead of waiting for the next 9 AM CT send. Single
+# row (id=1). Mirrored by the VM like the list itself.
+FL_CACHE_COLS = ("date", "spy_price", "call_wall", "put_wall",
+                 "gamma_flip", "chart_png_base64")
+
+
+def _fl_cache_get(con):
+    row = con.execute(
+        f"SELECT {','.join(FL_CACHE_COLS)} FROM free_levels_cache"
+        " WHERE id=1").fetchone()
+    return dict(zip(FL_CACHE_COLS, row)) if row else None
+
+
+def _fl_cache_set(con, cache):
+    con.execute(
+        f"""INSERT INTO free_levels_cache(id,{','.join(FL_CACHE_COLS)})
+            VALUES(1,{','.join('?' * len(FL_CACHE_COLS))})
+            ON CONFLICT(id) DO UPDATE SET
+            {','.join(c + '=excluded.' + c for c in FL_CACHE_COLS)}""",
+        [cache.get(c) for c in FL_CACHE_COLS])
+
+
+def _fl_chart_validate(raw):
+    """Return the base64 string only when it decodes to a genuine
+    PNG of sane size; otherwise None (text-only fallback)."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    import base64 as _b64mod
+    try:
+        decoded = _b64mod.b64decode(raw.strip(), validate=True)
+    except Exception:
+        return None
+    if decoded.startswith(b"\x89PNG\r\n\x1a\n") \
+            and len(decoded) <= 5_000_000:
+        return raw.strip()
+    return None
+
+
+def _winnipeg_today():
+    """Today's date in America/Winnipeg, computed arithmetically
+    from UTC - this host's zoneinfo cannot be trusted for
+    Winnipeg. CDT (UTC-5) from the 2nd Sunday of March 07:00 UTC
+    to the 1st Sunday of November 06:00 UTC, CST (UTC-6) else."""
+    from datetime import datetime as _dt, timezone as _tz
+    from datetime import timedelta as _td
+    now = _dt.now(_tz.utc)
+
+    def nth_sunday(y, m, n):
+        d = _dt(y, m, 1, tzinfo=_tz.utc)
+        return d + _td(days=(6 - d.weekday()) % 7 + 7 * (n - 1))
+
+    dst_start = nth_sunday(now.year, 3, 2) + _td(hours=7)
+    dst_end = nth_sunday(now.year, 11, 1) + _td(hours=6)
+    offset = -5 if dst_start <= now < dst_end else -6
+    return (now + _td(hours=offset)).date()
+
+
+def _fl_instant_send(email: str, token: str, cache: dict) -> bool:
+    """Email one new signup the cached latest levels right away.
+    Same locked wording family as the daily send; the first line
+    names the brief the levels came from (this morning's when the
+    cached date is today in Winnipeg, else the dated brief)."""
+    from datetime import datetime as _dt
+    try:
+        d = _dt.strptime(cache.get("date") or "", "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return False
+    vals = {f: str(cache.get(f) or "")
+            for f in ("spy_price", "call_wall", "put_wall",
+                      "gamma_flip")}
+    if any(not vals[f] for f in vals):
+        return False
+    subject = (f"Your first SPY gamma levels - "
+               f"{d.strftime('%b')} {d.day}")
+    if d == _winnipeg_today():
+        first = ("Here are the latest SPY gamma levels, from "
+                 "this morning's brief:")
+    else:
+        first = ("Here are the latest SPY gamma levels, from "
+                 f"the {d.strftime('%A')}, {d.strftime('%b')} "
+                 f"{d.day} brief:")
+    nxt = ("Your next one lands the next trading day at about "
+           "9:00 AM CT.")
+    unsub = _fl_unsub_link(email, token)
+    body = (
+        f"{first}\n\n"
+        f"SPY reference: ${vals['spy_price']}\n"
+        f"Call wall (ceiling): ${vals['call_wall']}\n"
+        f"Put wall (floor): ${vals['put_wall']}\n"
+        f"Gamma flip: ${vals['gamma_flip']}\n\n"
+        f"{nxt}\n\n"
+        "Members got the full brief before the open - the "
+        "read on what these levels mean, the QQQ levels, and "
+        "the day's plan. Your first look is free: start a "
+        "3-day free trial at "
+        "https://spybeforeyoubuytrading.com\n\n"
+        "SpyBeforeYouBuy\n\n"
+        "You are getting this because you signed up for free "
+        "SPY gamma levels at spybeforeyoubuytrading.com. "
+        f"Unsubscribe: {unsub}")
+    png = _fl_chart_validate(cache.get("chart_png_base64"))
+    if png:
+        return _resend_send_rich(
+            email, subject, body,
+            _fl_html_body(vals, unsub, first_line=first,
+                          extra_line=nxt), png)
+    return _resend_send(email, subject, body)
+
+
 @app.post("/free-levels/signup")
 def free_levels_signup(payload: dict):
     """Public: join the free SPY gamma levels email list. Body
     {email, source}. A duplicate signup is a success with no
     duplicate row; a fresh signup on an unsubscribed address
-    reactivates it (the newest explicit opt-in wins)."""
+    reactivates it (the newest explicit opt-in wins). When the
+    row becomes newly active (brand-new or reactivated - never a
+    duplicate on an already-active row) and a latest-levels cache
+    exists, the cached levels email goes to that address
+    immediately; the response reports it as instant_sent."""
     email = (payload.get("email") or "").strip().lower()
     if not _fl_email_ok(email):
         return JSONResponse({"ok": False, "detail": "invalid email"},
@@ -2995,8 +3114,9 @@ def free_levels_signup(payload: dict):
     con = _fl_db()
     try:
         row = con.execute(
-            "SELECT email FROM free_levels WHERE email=?",
-            (email,)).fetchone()
+            "SELECT unsub_token, active FROM free_levels"
+            " WHERE email=?", (email,)).fetchone()
+        became_active = False
         if row is None:
             token = hashlib.sha256(
                 (email + ":" + os.urandom(16).hex()).encode()
@@ -3005,14 +3125,27 @@ def free_levels_signup(payload: dict):
                 "INSERT INTO free_levels(email, ts, source,"
                 " unsub_token, active) VALUES(?,?,?,?,1)",
                 (email, time.time(), source, token))
+            became_active = True
         else:
-            con.execute(
-                "UPDATE free_levels SET active=1 WHERE email=?",
-                (email,))
+            token = row[0]
+            if not row[1]:
+                con.execute(
+                    "UPDATE free_levels SET active=1 WHERE email=?",
+                    (email,))
+                became_active = True
         con.commit()
+        cache = _fl_cache_get(con) if became_active else None
     finally:
         con.close()
-    return {"ok": True}
+    instant_sent = False
+    if became_active and cache:
+        try:
+            instant_sent = bool(
+                _fl_instant_send(email, token, cache))
+        except Exception as e:
+            print(f"[free-levels] instant send failed for "
+                  f"{email}: {e}", flush=True)
+    return {"ok": True, "instant_sent": instant_sent}
 
 
 @app.get("/free-levels/unsubscribe", response_class=HTMLResponse)
@@ -3063,9 +3196,11 @@ def free_levels_list(key: str = ""):
         rows = con.execute(
             f"SELECT {','.join(FREE_LEVELS_COLS)} FROM free_levels"
             " ORDER BY ts").fetchall()
+        cache = _fl_cache_get(con)
     finally:
         con.close()
-    return {"rows": [dict(zip(FREE_LEVELS_COLS, r)) for r in rows]}
+    return {"rows": [dict(zip(FREE_LEVELS_COLS, r)) for r in rows],
+            "cache": cache}
 
 
 @app.post("/free-levels/restore")
@@ -3077,6 +3212,7 @@ def free_levels_restore(payload: dict, key: str = ""):
     if not _key_ok(key):
         return JSONResponse({"detail": "not found"}, status_code=404)
     restored = 0
+    cache_restored = False
     con = _fl_db()
     try:
         for row in payload.get("rows") or []:
@@ -3091,10 +3227,59 @@ def free_levels_restore(payload: dict, key: str = ""):
                  row.get("unsub_token"),
                  0 if row.get("active") in (0, False) else 1))
             restored += cur.rowcount or 0
+        cache_in = payload.get("cache")
+        if cache_in and _fl_cache_get(con) is None:
+            _fl_cache_set(con, cache_in)
+            cache_restored = True
         con.commit()
     finally:
         con.close()
-    return {"restored": restored}
+    return {"restored": restored, "cache_restored": cache_restored}
+
+
+def _fl_levels_from_payload(payload: dict):
+    """(vals, date_str) from a send/prime payload, or None when a
+    level is missing. vals are the display strings exactly as the
+    emails print them."""
+    vals = {}
+    for f in ("spy_price", "call_wall", "put_wall", "gamma_flip"):
+        v = payload.get(f)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        vals[f] = (f"{float(v):.2f}" if isinstance(v, (int, float))
+                   else str(v).strip())
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        d = _dt.strptime((payload.get("date") or "").strip(),
+                         "%Y-%m-%d")
+    except (ValueError, TypeError):
+        d = _dt.now(_tz.utc)
+    return vals, d.strftime("%Y-%m-%d")
+
+
+@app.post("/free-levels/prime")
+def free_levels_prime(payload: dict, key: str = ""):
+    """Keyed: set the latest-levels cache WITHOUT emailing the
+    list (same payload shape as /free-levels/send). Seeds the
+    cache ahead of the first daily send so instant signup emails
+    have levels to carry."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    parsed = _fl_levels_from_payload(payload)
+    if parsed is None:
+        return JSONResponse({"detail": "levels required"},
+                            status_code=400)
+    vals, date_str = parsed
+    con = _fl_db()
+    try:
+        _fl_cache_set(con, {
+            "date": date_str, **vals,
+            "chart_png_base64": _fl_chart_validate(
+                payload.get("chart_png_base64"))})
+        con.commit()
+    finally:
+        con.close()
+    return {"primed": True, "date": date_str}
 
 
 @app.post("/free-levels/delete")
@@ -3161,7 +3346,10 @@ def _resend_send_rich(to_email: str, subject: str, text: str,
         return False
 
 
-def _fl_html_body(vals: dict, unsub_link: str) -> str:
+def _fl_html_body(vals: dict, unsub_link: str,
+                  first_line: str = "Here are today's SPY gamma "
+                  "levels, from this morning's brief:",
+                  extra_line: str | None = None) -> str:
     """HTML twin of the locked free-levels text: identical wording,
     the chart image on top, links clickable."""
     from html import escape as _esc
@@ -3171,13 +3359,13 @@ def _fl_html_body(vals: dict, unsub_link: str) -> str:
         "color:#111111'>"
         "<img src='cid:sbyb-chart' alt='SPY Gamma Terminal' "
         "style='max-width:100%;height:auto;display:block'>"
-        "<p>Here are today's SPY gamma levels, from this "
-        "morning's brief:</p>"
+        f"<p>{_esc(first_line)}</p>"
         f"<p>SPY reference: ${_esc(vals['spy_price'])}<br>"
         f"Call wall (ceiling): ${_esc(vals['call_wall'])}<br>"
         f"Put wall (floor): ${_esc(vals['put_wall'])}<br>"
         f"Gamma flip: ${_esc(vals['gamma_flip'])}</p>"
-        "<p>Members got the full brief before the open - the "
+        + (f"<p>{_esc(extra_line)}</p>" if extra_line else "")
+        + "<p>Members got the full brief before the open - the "
         "read on what these levels mean, the QQQ levels, and "
         "the day's plan. Your first look is free: start a "
         "3-day free trial at "
@@ -3230,18 +3418,7 @@ def free_levels_send(payload: dict, key: str = ""):
         con.close()
     # Optional chart: accept only a genuine PNG of sane size;
     # anything else quietly falls back to the text-only send.
-    png_b64 = None
-    raw_chart = payload.get("chart_png_base64")
-    if isinstance(raw_chart, str) and raw_chart.strip():
-        import base64 as _b64mod
-        try:
-            decoded = _b64mod.b64decode(raw_chart.strip(),
-                                        validate=True)
-            if decoded.startswith(b"\x89PNG\r\n\x1a\n") \
-                    and len(decoded) <= 5_000_000:
-                png_b64 = raw_chart.strip()
-        except Exception:
-            png_b64 = None
+    png_b64 = _fl_chart_validate(payload.get("chart_png_base64"))
     sent = skipped = 0
     for email, token in rows:
         unsub = _fl_unsub_link(email, token)
@@ -3271,6 +3448,16 @@ def free_levels_send(payload: dict, key: str = ""):
             sent += 1
         else:
             skipped += 1
+    # Every completed send refreshes the latest-levels cache that
+    # instant signup emails draw from.
+    con = _fl_db()
+    try:
+        _fl_cache_set(con, {
+            "date": d.strftime("%Y-%m-%d"), **vals,
+            "chart_png_base64": png_b64})
+        con.commit()
+    finally:
+        con.close()
     return {"sent": sent, "skipped": skipped,
             "chart": bool(png_b64)}
 
