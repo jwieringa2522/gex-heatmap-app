@@ -3044,56 +3044,29 @@ def _winnipeg_today():
     return (now + _td(hours=offset)).date()
 
 
-def _fl_instant_send(email: str, token: str, cache: dict) -> bool:
-    """Email one new signup the cached latest levels right away.
-    Same locked wording family as the daily send; the first line
-    names the brief the levels came from (this morning's when the
-    cached date is today in Winnipeg, else the dated brief)."""
-    from datetime import datetime as _dt
-    try:
-        d = _dt.strptime(cache.get("date") or "", "%Y-%m-%d").date()
-    except (ValueError, TypeError):
-        return False
-    vals = {f: str(cache.get(f) or "")
-            for f in ("spy_price", "call_wall", "put_wall",
-                      "gamma_flip")}
-    if any(not vals[f] for f in vals):
-        return False
-    subject = (f"Your first SPY gamma levels - "
-               f"{d.strftime('%b')} {d.day}")
-    if d == _winnipeg_today():
-        first = ("Here are the latest SPY gamma levels, from "
-                 "this morning's brief:")
-    else:
-        first = ("Here are the latest SPY gamma levels, from "
-                 f"the {d.strftime('%A')}, {d.strftime('%b')} "
-                 f"{d.day} brief:")
-    nxt = ("Your next one lands the next trading day at about "
-           "9:00 AM CT.")
+def _fl_welcome_send(email: str, token: str) -> bool:
+    """Short welcome email for a new free-levels signup. No
+    levels, no chart - the levels arrive with the daily email at
+    9:00 AM CT, 30 minutes after the open (Justin's call,
+    Nov 23, 2026: welcome only at signup, replacing the instant
+    levels email built earlier that night)."""
     unsub = _fl_unsub_link(email, token)
     body = (
-        f"{first}\n\n"
-        f"SPY reference: ${vals['spy_price']}\n"
-        f"Call wall (ceiling): ${vals['call_wall']}\n"
-        f"Put wall (floor): ${vals['put_wall']}\n"
-        f"Gamma flip: ${vals['gamma_flip']}\n\n"
-        f"{nxt}\n\n"
-        "Members got the full brief before the open - the "
-        "read on what these levels mean, the QQQ levels, and "
-        "the day's plan. Your first look is free: start a "
-        "3-day free trial at "
+        "Hi - you're signed up for the free SPY gamma levels.\n\n"
+        "Your first one lands the next trading day at about "
+        "9:00 AM CT, 30 minutes after the open - the SPY "
+        "reference price, call wall, put wall and gamma flip, "
+        "with the chart.\n\n"
+        "Members get the full brief before the open, with the "
+        "read and the QQQ levels too. If you want in on that, "
+        "there is a 3-day free trial at "
         "https://spybeforeyoubuytrading.com\n\n"
         "SpyBeforeYouBuy\n\n"
         "You are getting this because you signed up for free "
         "SPY gamma levels at spybeforeyoubuytrading.com. "
         f"Unsubscribe: {unsub}")
-    png = _fl_chart_validate(cache.get("chart_png_base64"))
-    if png:
-        return _resend_send_rich(
-            email, subject, body,
-            _fl_html_body(vals, unsub, first_line=first,
-                          extra_line=nxt), png)
-    return _resend_send(email, subject, body)
+    return _resend_send(
+        email, "You're in - free SPY gamma levels", body)
 
 
 @app.post("/free-levels/signup")
@@ -3103,9 +3076,10 @@ def free_levels_signup(payload: dict):
     duplicate row; a fresh signup on an unsubscribed address
     reactivates it (the newest explicit opt-in wins). When the
     row becomes newly active (brand-new or reactivated - never a
-    duplicate on an already-active row) and a latest-levels cache
-    exists, the cached levels email goes to that address
-    immediately; the response reports it as instant_sent."""
+    duplicate on an already-active row) a short welcome email
+    goes to that address; the response reports it as
+    welcome_sent. No levels at signup - they arrive with the
+    daily 9:00 AM CT email."""
     email = (payload.get("email") or "").strip().lower()
     if not _fl_email_ok(email):
         return JSONResponse({"ok": False, "detail": "invalid email"},
@@ -3134,18 +3108,16 @@ def free_levels_signup(payload: dict):
                     (email,))
                 became_active = True
         con.commit()
-        cache = _fl_cache_get(con) if became_active else None
     finally:
         con.close()
-    instant_sent = False
-    if became_active and cache:
+    welcome_sent = False
+    if became_active:
         try:
-            instant_sent = bool(
-                _fl_instant_send(email, token, cache))
+            welcome_sent = bool(_fl_welcome_send(email, token))
         except Exception as e:
-            print(f"[free-levels] instant send failed for "
+            print(f"[free-levels] welcome send failed for "
                   f"{email}: {e}", flush=True)
-    return {"ok": True, "instant_sent": instant_sent}
+    return {"ok": True, "welcome_sent": welcome_sent}
 
 
 @app.get("/free-levels/unsubscribe", response_class=HTMLResponse)
