@@ -3119,13 +3119,90 @@ def free_levels_delete(payload: dict, key: str = ""):
     return {"email": email, "deleted": deleted}
 
 
+def _resend_send_rich(to_email: str, subject: str, text: str,
+                      html_body: str, png_b64: str) -> bool:
+    """Send one email through Resend with a plain-text part, an
+    HTML part and the chart PNG inline (CID attachment, so Gmail
+    shows it without a click). Same identity and failure contract
+    as _resend_send."""
+    if SBYB_TEST_MODE:
+        print(f"[email] TEST MODE rich send to {to_email}: "
+              f"{subject}", flush=True)
+        return True
+    if not RESEND_API_KEY:
+        print(f"[email] no RESEND_API_KEY - cannot send to "
+              f"{to_email}", flush=True)
+        return False
+    try:
+        payload = {"from": WELCOME_FROM, "to": [to_email],
+                   "subject": subject, "text": text,
+                   "html": html_body,
+                   "attachments": [{
+                       "filename": "spy-gamma-terminal.png",
+                       "content": png_b64,
+                       "content_type": "image/png",
+                       "content_id": "sbyb-chart"}]}
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            "https://api.resend.com/emails", data=body, method="POST")
+        req.add_header("Authorization", f"Bearer {RESEND_API_KEY}")
+        req.add_header("Content-Type", "application/json")
+        # Same Cloudflare 1010 lesson as _resend_send: normal UA.
+        req.add_header("User-Agent",
+                       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/130.0 Safari/537.36")
+        req.add_header("Accept", "application/json")
+        urllib.request.urlopen(req, timeout=30).read()
+        return True
+    except Exception as e:
+        print(f"[email] Resend rich send failed for {to_email}: "
+              f"{e}", flush=True)
+        return False
+
+
+def _fl_html_body(vals: dict, unsub_link: str) -> str:
+    """HTML twin of the locked free-levels text: identical wording,
+    the chart image on top, links clickable."""
+    from html import escape as _esc
+    trial = "https://spybeforeyoubuytrading.com"
+    return (
+        "<!DOCTYPE html><html><body style='font-family:sans-serif;"
+        "color:#111111'>"
+        "<img src='cid:sbyb-chart' alt='SPY Gamma Terminal' "
+        "style='max-width:100%;height:auto;display:block'>"
+        "<p>Here are today's SPY gamma levels, from this "
+        "morning's brief:</p>"
+        f"<p>SPY reference: ${_esc(vals['spy_price'])}<br>"
+        f"Call wall (ceiling): ${_esc(vals['call_wall'])}<br>"
+        f"Put wall (floor): ${_esc(vals['put_wall'])}<br>"
+        f"Gamma flip: ${_esc(vals['gamma_flip'])}</p>"
+        "<p>Members got the full brief before the open - the "
+        "read on what these levels mean, the QQQ levels, and "
+        "the day's plan. Your first look is free: start a "
+        "3-day free trial at "
+        f"<a href='{trial}'>{trial}</a></p>"
+        "<p>SpyBeforeYouBuy</p>"
+        "<p style='font-size:12px;color:#666666'>You are getting "
+        "this because you signed up for free SPY gamma levels at "
+        "spybeforeyoubuytrading.com. Unsubscribe: "
+        f"<a href='{_esc(unsub_link)}'>{_esc(unsub_link)}</a></p>"
+        "</body></html>")
+
+
 @app.post("/free-levels/send")
 def free_levels_send(payload: dict, key: str = ""):
     """Keyed: send today's free SPY gamma levels email to every
     ACTIVE free-levels row, one send per recipient so each email
     carries its own unsubscribe link. Body {date, spy_price,
-    call_wall, put_wall, gamma_flip}. Levels only - the locked
-    template below has no read and no QQQ, ever."""
+    call_wall, put_wall, gamma_flip} plus an optional
+    chart_png_base64 (the SPY-only Gamma Terminal panel): when it
+    decodes to a real PNG the email goes out as HTML with the
+    chart inline at the top and the same locked text as the
+    plain-text part; when it is absent or invalid the send falls
+    back to the plain text version - the chart never fails the
+    send. Levels only - the locked template has no read and no
+    QQQ data, ever."""
     if not _key_ok(key):
         return JSONResponse({"detail": "not found"}, status_code=404)
     vals = {}
@@ -3151,8 +3228,23 @@ def free_levels_send(payload: dict, key: str = ""):
             " WHERE active=1 ORDER BY ts").fetchall()
     finally:
         con.close()
+    # Optional chart: accept only a genuine PNG of sane size;
+    # anything else quietly falls back to the text-only send.
+    png_b64 = None
+    raw_chart = payload.get("chart_png_base64")
+    if isinstance(raw_chart, str) and raw_chart.strip():
+        import base64 as _b64mod
+        try:
+            decoded = _b64mod.b64decode(raw_chart.strip(),
+                                        validate=True)
+            if decoded.startswith(b"\x89PNG\r\n\x1a\n") \
+                    and len(decoded) <= 5_000_000:
+                png_b64 = raw_chart.strip()
+        except Exception:
+            png_b64 = None
     sent = skipped = 0
     for email, token in rows:
+        unsub = _fl_unsub_link(email, token)
         body = (
             "Here are today's SPY gamma levels, from this "
             "morning's brief:\n\n"
@@ -3168,12 +3260,19 @@ def free_levels_send(payload: dict, key: str = ""):
             "SpyBeforeYouBuy\n\n"
             "You are getting this because you signed up for free "
             "SPY gamma levels at spybeforeyoubuytrading.com. "
-            f"Unsubscribe: {_fl_unsub_link(email, token)}")
-        if _resend_send(email, subject, body):
+            f"Unsubscribe: {unsub}")
+        if png_b64:
+            ok = _resend_send_rich(email, subject, body,
+                                   _fl_html_body(vals, unsub),
+                                   png_b64)
+        else:
+            ok = _resend_send(email, subject, body)
+        if ok:
             sent += 1
         else:
             skipped += 1
-    return {"sent": sent, "skipped": skipped}
+    return {"sent": sent, "skipped": skipped,
+            "chart": bool(png_b64)}
 
 
 @app.post("/stripe/repair-invite")
