@@ -3352,6 +3352,47 @@ def _fl_html_body(vals: dict, unsub_link: str,
         "</body></html>")
 
 
+@app.get("/usage/builds")
+def usage_builds(key: str = ""):
+    """Keyed: every heatmap build still in the app DB (the quota
+    writer prunes rows older than the quota window and the DB
+    wipes on redeploys, so this is a rolling recent window -
+    site_sync merges each read into the VM's permanent usage
+    mirror for reporting), plus a per-user summary: builds in
+    the last 7 days and the distinct tickers they ran."""
+    if not _key_ok(key):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    con = _db()
+    try:
+        rows = con.execute(
+            "SELECT tg_id, username, ticker, ts FROM builds"
+            " ORDER BY ts").fetchall()
+    finally:
+        con.close()
+    builds = [{"tg_id": t, "username": u, "ticker": tk, "ts": ts}
+              for t, u, tk, ts in rows]
+    cutoff = time.time() - 7 * 86400
+    per = {}
+    for b in builds:
+        e = per.setdefault(b["tg_id"], {
+            "tg_id": b["tg_id"], "username": b["username"],
+            "builds_7d": 0, "tickers_7d": set(), "total_builds": 0})
+        e["total_builds"] += 1
+        if b["username"]:
+            e["username"] = b["username"]
+        if b["ts"] and b["ts"] >= cutoff:
+            e["builds_7d"] += 1
+            if b["ticker"]:
+                e["tickers_7d"].add(b["ticker"])
+    summary = []
+    for e in per.values():
+        e = dict(e)
+        e["tickers_7d"] = sorted(e["tickers_7d"])
+        summary.append(e)
+    summary.sort(key=lambda x: -x["builds_7d"])
+    return {"builds": builds, "summary": summary}
+
+
 @app.post("/free-levels/send")
 def free_levels_send(payload: dict, key: str = ""):
     """Keyed: send today's free SPY gamma levels email to every
