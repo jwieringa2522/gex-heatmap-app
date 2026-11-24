@@ -3728,7 +3728,8 @@ def email_referral_run(key: str = ""):
     the first charge; a trialing member's window starts when the
     trial converts) and who has not been sent it yet. Sent once per
     member, ever - the durable marker is the Stripe subscription
-    metadata, mirrored in the app record."""
+    metadata, mirrored in the app record. Lifetime members never
+    get this email (Justin's order Nov 24, 2026)."""
     if not _key_ok(key):
         return JSONResponse({"detail": "not found"}, status_code=404)
     con = _subs_db()
@@ -3741,6 +3742,12 @@ def email_referral_run(key: str = ""):
                FROM site_subs""").fetchall()
         now = time.time()
         for email, plan, status, created_ts, sent_ts, sub_id in rows:
+            if status == "lifetime" or \
+                    (plan or "").strip().lower() == "lifetime":
+                skipped.append(
+                    {"email": email,
+                     "reason": "lifetime - no referral email"})
+                continue
             if status not in REF_EMAIL_STATUSES:
                 continue
             if (email or "").strip().lower() in REF_EMAIL_TEST_SKIP:
