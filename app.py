@@ -1901,9 +1901,14 @@ def _promo_state(force=False):
 
 
 @app.get("/promo/state")
+@app.get("/sale/state")
 def promo_state():
     """Public read for the site banner. Fail-closed: any error, or no
-    live promo, returns {"active": false} and the site shows nothing."""
+    live promo, returns {"active": false} and the site shows nothing.
+    /sale/state is a neutral alias (added Nov 25, 2026): ad blockers
+    in some visitors' browsers kill requests to URLs containing
+    "promo", so the site banner reads this path instead. Identical
+    JSON either way; /promo/state keeps working for everything else."""
     try:
         if not STRIPE_SECRET_KEY:
             return {"active": False}
@@ -1925,10 +1930,12 @@ def promo_state():
 
 
 @app.options("/promo/state")
+@app.options("/sale/state")
 def promo_state_options():
     """CORS preflight for the marketing site's cross-origin fetch
     (fix Nov 18, 2026: without this the preflight got a 405 and every
-    browser blocked the fetch, so the promo banner never rendered)."""
+    browser blocked the fetch, so the promo banner never rendered).
+    /sale/state covered too - it is the alias the banner now uses."""
     return JSONResponse({}, status_code=200, headers={
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -1959,7 +1966,7 @@ async def _promo_state_cors(request, call_next):
     /free-levels/signup is the same shape (public signup form on
     the marketing site) and gets the same treatment."""
     resp = await call_next(request)
-    if request.url.path in ("/promo/state", "/free-levels/signup"):
+    if request.url.path in ("/promo/state", "/sale/state", "/free-levels/signup"):
         resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
