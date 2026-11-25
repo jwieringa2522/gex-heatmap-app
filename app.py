@@ -1936,13 +1936,29 @@ def promo_state_options():
     })
 
 
+@app.options("/free-levels/signup")
+def free_levels_signup_options():
+    """CORS preflight for the marketing site's free-levels signup
+    form (fix Nov 25, 2026: the endpoint shipped Nov 23 without
+    one, so the preflight got a 405 and browsers blocked the
+    form's fetch - same failure as /promo/state on Nov 18)."""
+    return JSONResponse({}, status_code=200, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Max-Age": "86400",
+    })
+
+
 @app.middleware("http")
 async def _promo_state_cors(request, call_next):
     """The marketing site (spybeforeyoubuytrading.com) fetches
     /promo/state cross-origin. The endpoint is public and
-    non-sensitive, so allow any origin - on this route only."""
+    non-sensitive, so allow any origin - on this route only.
+    /free-levels/signup is the same shape (public signup form on
+    the marketing site) and gets the same treatment."""
     resp = await call_next(request)
-    if request.url.path == "/promo/state":
+    if request.url.path in ("/promo/state", "/free-levels/signup"):
         resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
