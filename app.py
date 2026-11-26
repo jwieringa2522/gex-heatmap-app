@@ -5034,11 +5034,11 @@ def _self_heal_subs():
 
 
 # ---------- cancel-save flow (Justin's order, Nov 14 2026) ----------
-# A member who goes to cancel first gets ONE save offer: 25% off
+# A member who goes to cancel first gets ONE save offer: 50% off
 # their next payment, one time, on any recurring plan (Monthly /
 # Quarterly / Yearly / Indicators Only - Lifetime has no renewal to
 # discount). The discount is applied by the app directly to the
-# Stripe subscription (coupon tagged sbyb=save25) - never a public
+# Stripe subscription (coupon tagged sbyb=save50) - never a public
 # promo code, never on a Payment Link, so it cannot be shared or
 # re-triggered. The one-time lock rides the identity registry: a
 # sbyb_save_used_ts stamp on Stripe metadata, mirrored into
@@ -5057,7 +5057,7 @@ def _self_heal_subs():
 #   member's personal /save/<code> link (same email-derived code as
 #   /ref/<code>). Redeeming it before the period ends undoes the
 #   pending cancel and applies the discount.
-SAVE25_TAG = "save25"
+SAVE50_TAG = "save50"
 SAVE_ELIGIBLE_STATUSES = ("active", "trialing", "past_due")
 SAVE_REASONS = ("Too expensive", "Not using it enough",
                 "Not for my trading style", "Technical trouble",
@@ -5075,7 +5075,7 @@ def _save_event(con, email, event, reason=None, sub_id=None):
 
 
 def _save_coupon_id():
-    """Resolve the SAVE25 coupon id from Stripe (metadata tag).
+    """Resolve the SAVE50 coupon id from Stripe (metadata tag).
     Cached 10 minutes; None when setup has not run."""
     now = time.time()
     if (_SAVE_COUPON_CACHE["id"]
@@ -5086,7 +5086,7 @@ def _save_coupon_id():
         coupons = _stripe_get("coupons?limit=100").get("data") or []
         c = next((c for c in coupons
                   if (c.get("metadata") or {}).get("sbyb")
-                  == SAVE25_TAG and c.get("valid")), None)
+                  == SAVE50_TAG and c.get("valid")), None)
         cid = c.get("id") if c else None
     except Exception as e:
         print(f"[save] coupon lookup failed: {e}", flush=True)
@@ -5163,7 +5163,7 @@ def _stripe_sub_live(sub_id):
 
 
 def _save_redeem(con, email):
-    """Grant the save offer: apply the SAVE25 coupon to the
+    """Grant the save offer: apply the SAVE50 coupon to the
     subscription, clear any pending cancel_at_period_end, stamp the
     identity. Refusals are logged to save_events like referral
     blocks. Returns a result dict; never raises."""
@@ -5210,8 +5210,8 @@ def _save_redeem(con, email):
 
 @app.post("/stripe/save-setup")
 def stripe_save_setup(key: str = ""):
-    """Keyed, idempotent: make sure the SAVE25 coupon exists in
-    Stripe - 25% off, duration once, restricted to the membership
+    """Keyed, idempotent: make sure the SAVE50 coupon exists in
+    Stripe - 50% off, duration once, restricted to the membership
     product (all plans share it, Indicators Only included). No
     promotion code is ever created for it: the app applies the
     coupon directly to a subscription at redemption."""
@@ -5231,9 +5231,9 @@ def stripe_save_setup(key: str = ""):
             if prod and prod not in products:
                 products.append(prod)
         fields = {
-            "percent_off": "25", "duration": "once",
-            "name": "Cancel-save - 25% off next payment",
-            "metadata[sbyb]": SAVE25_TAG}
+            "percent_off": "50", "duration": "once",
+            "name": "Cancel-save - 50% off next payment",
+            "metadata[sbyb]": SAVE50_TAG}
         for i, prod in enumerate(products):
             fields[f"applies_to[products][{i}]"] = prod
         coupon = _stripe_post("coupons", fields)
@@ -5395,16 +5395,16 @@ def _save_screen(email, d, live):
                 "Accept below and the cancel is undone - you stay a "
                 "member.</p>")
     body = (
-        '<div class="big">Stay and get 25% off your next '
+        '<div class="big">Stay and get 50% off your next '
         "month</div>"
         f"{note}"
-        "<p>Accept and 25% comes off your next payment "
+        "<p>Accept and 50% comes off your next payment "
         "automatically - same plan, same access, nothing else "
         "changes. This is a one-time offer.</p>"
         f'<form method="post" action="/save/{code}/accept">'
         '<p><button class="btn" type="submit" '
         'style="border:0;cursor:pointer">ACCEPT - STAY AND SAVE '
-        "25%</button></p></form>"
+        "50%</button></p></form>"
         f'<p><a href="/save/{code}/decline">No thanks, cancel</a>'
         "</p>"
         f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>')
@@ -5447,7 +5447,7 @@ def save_page(code: str):
                     '<div class="big">Your cancellation is already '
                     "set.</div>"
                     f"<p>Your access runs{until}, and you will not "
-                    "be charged again. The 25% stay offer was "
+                    "be charged again. The 50% stay offer was "
                     "already used on this membership, so it cannot "
                     "be applied again.</p>"
                     f'<div class="small">Changed your mind about '
@@ -5473,7 +5473,7 @@ def save_accept(code: str):
     finally:
         con.close()
     if result.get("ok"):
-        body = ('<div class="big">You\'re staying - 25% off your '
+        body = ('<div class="big">You\'re staying - 50% off your '
                 "next payment is applied.</div>"
                 "<p>The discount is on your subscription now and "
                 "comes off your next payment automatically. Any "
