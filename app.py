@@ -1652,8 +1652,8 @@ style="padding:12px 16px;border-radius:8px;border:1px solid #3a4542;background:#
 </form>
 <p class="small">Give a month, get a month: a friend who joins
 Monthly through your link gets their first month for $10 instead
-of $20. Once their first payment has cleared the 3-day refund
-window, a free month is added to your account and comes off your
+of $20. Once their first payment is 3 days old,
+a free month is added to your account and comes off your
 next renewal automatically. You can bank up to 12 free months.</p>"""
 
 
@@ -1684,8 +1684,8 @@ async def referral_submit(request: Request):
         f'{_referral_share_html(info["link"])}'
         "<p>Share it anywhere. A friend who joins Monthly "
         "through it gets their first month for $10 instead of "
-        "$20, and once their first payment clears the 3-day "
-        "refund window, you bank a free month - it comes off "
+        "$20, and once their first payment is 3 days old, "
+        "you bank a free month - it comes off "
         "your next renewal automatically.</p>"
         f'<div class="small">Free months banked: {info["bank"]} '
         f'of 12 - free months earned so far: {info["earned"]} - '
@@ -3719,7 +3719,7 @@ def _referral_email_compose(sub: dict) -> tuple[str, str]:
 
 Share it with anyone who trades. A friend who joins Monthly through your link gets their first month for $10 instead of $20.
 
-Once their first payment clears the 3-day refund window, a free month is added to your account. It comes off your next renewal automatically - you do not need to do anything.
+Once their first payment is 3 days old, a free month is added to your account. It comes off your next renewal automatically - you do not need to do anything.
 
 You can bank up to 12 free months.
 
@@ -6754,16 +6754,12 @@ _SUPPORT_FACTS = """SpyBeforeYouBuy facts (the ONLY facts you may use):
   the trial. The trial is one per person, ever - if you have had a
   free trial before, a new Monthly signup is charged right away,
   with no trial.
-- Refunds: one refund per person, ever - a full refund inside the
-  first 3 days of a first purchase of Monthly, Quarterly or Yearly
-  only. After that window, or if
-  you have already had a refund, all sales are final; renewals are
-  always final. Lifetime is a final sale - no refunds.
-  Cancelling during the free trial
-  means the member is never charged, so there is nothing to
-  refund; the 3-day refund window runs from the first charge,
-  when the trial converts. Refunds and cancellations are only
-  ever processed by email to the support address, never in chat.
+- Refunds: all sales are final once a payment has been charged -
+  there are no refunds on any plan, and renewals are final too.
+  The try-before-you-buy is the 3-day free trial on Monthly:
+  cancelling during the trial means the member is never charged.
+  Refund requests and cancellations are only ever handled by
+  email to the support address, never in chat.
 - Promos run from time to time for a few days - 10 or 15% off the
   first payment on Monthly, Quarterly, Yearly and Lifetime. The banner on
   the site shows the current one; if there is no banner, no promo
@@ -6940,10 +6936,9 @@ def _scripted_answer(q: str) -> str | None:
         return ("For a disputed or unfamiliar charge, email "
                 f"{SUPPORT_EMAIL} with the email you subscribed "
                 "with, and it will be looked at properly. The refund "
-                "policy itself: a full refund inside the first 3 "
-                "days of a first purchase of Monthly, Quarterly or "
-                "Yearly, one refund per person, "
-                "ever - after that window all sales are final.")
+                "policy itself: all sales are final once a payment "
+                "has been charged - there are no refunds on any "
+                "plan.")
     if phrase("refund me", "give me a refund", "want a refund",
               "need a refund", "get my money back", "refund my") or (
             is_cancel and phrase("cancel my", "cancel it",
@@ -6953,23 +6948,18 @@ def _scripted_answer(q: str) -> str | None:
                 f"{SUPPORT_EMAIL} with the email you subscribed "
                 "with and it will be taken care of there. The policy "
                 "it runs on: cancelling during the free trial means "
-                "no charge at all; a first purchase of Monthly, "
-                "Quarterly or Yearly is refundable "
-                "inside 3 days of the charge, one refund per person, "
-                "ever; renewals are final after that "
-                "window, and Lifetime is a final sale.")
+                "no charge at all; once a payment has been charged, "
+                "all sales are final - there are no refunds on any "
+                "plan, including renewals and Lifetime.")
     if is_trial and is_cancel and is_refund:
-        return ("Good question - the trial changes it. If you "
-                "cancel during the 3-day free trial, you are never "
-                "charged, so there is nothing to refund. The refund "
-                "window starts when the trial ends and the first "
-                "charge lands: from that day you have 3 days to ask "
-                "for a refund on that first purchase, and it is one "
-                "refund per person, ever. Cancel after that window "
-                "and it just stops the next renewal - no refund, and "
-                "renewals are final. Lifetime is a final sale - no "
-                "refunds. To ask inside "
-                f"the window, email {SUPPORT_EMAIL}.")
+        return ("Good question - the trial is the free look. If "
+                "you cancel during the 3-day free trial, you are "
+                "never charged, so there is nothing to refund. Once "
+                "the trial ends and a payment goes through, all "
+                "sales are final - there are no refunds on any "
+                "plan, and cancelling after that just stops the "
+                "next renewal. If you think a charge is wrong, "
+                f"email {SUPPORT_EMAIL}.")
     if is_trial and is_cancel and has(
             "charge", "charged", "pay", "billed", "bill"):
         return ("No - cancelling during the 3-day free trial means "
@@ -6981,43 +6971,38 @@ def _scripted_answer(q: str) -> str | None:
     if is_refund and (has("renewal", "renewed", "renews",
                           "renewing")
                       or phrase("charged again", "second charge")):
-        return ("Renewals are final - the refund window only "
-                "covers a first purchase of Monthly, Quarterly or "
-                "Yearly, inside 3 days of that "
-                "first charge. A renewal charge is not refundable, "
-                "but you can cancel anytime from your billing link "
-                "so it does not renew again, and your access runs "
-                "to the end of the period you paid for.")
+        return ("Renewals are final - once any payment has been "
+                "charged there are no refunds, on a renewal or on "
+                "a first purchase. You can cancel anytime from "
+                "your billing link so it does not renew again, and "
+                "your access runs to the end of the period you "
+                "paid for.")
     if is_refund and has("lifetime"):
-        return ("Lifetime is a final sale - no refunds. "
-                "The 3-day refund window applies to "
-                "first purchases of Monthly, Quarterly and Yearly "
-                "only, and it is one refund per person, ever.")
+        return ("Lifetime is a final sale - no refunds. The "
+                "same goes for every plan: once a payment has "
+                "been charged, all sales are final.")
     if is_refund and phrase(
             "second refund", "another refund", "refund again",
             "refunded before", "already refunded",
             "already had a refund"):
-        return ("It is one refund per person, ever. If you have "
-                "already had a refund, a later purchase is final - "
-                "there is no second refund, even inside 3 days. "
-                "That is what the free trial is for: Monthly gives "
-                "you 3 days to try everything before any charge.")
+        return ("All sales are final once a payment has been "
+                "charged - there are no refunds on any plan, so "
+                "there is no second refund either. That is what "
+                "the free trial is for: Monthly gives you 3 days "
+                "to try everything before any charge.")
     if is_refund and phrase("how long"):
-        return ("Refunds are handled by email - write to "
+        return ("There are no refunds to wait on - all sales "
+                "are final once a payment has been charged. If "
+                "you think a charge is wrong, write to "
                 f"{SUPPORT_EMAIL} with the email you subscribed "
-                "with. Inside the policy window (first 3 days of a "
-                "first purchase of Monthly, Quarterly or Yearly, "
-                "one per person, ever) it is "
-                "refunded in full to the card you paid with.")
+                "with and it will be looked at.")
     if has("refund", "refunds") or phrase("money back"):
-        return ("Yes - on a first purchase of Monthly, Quarterly "
-                "or Yearly, and it is one refund "
-                "per person, ever. Ask within 3 days of the "
-                "charge and it is refunded in full. After that window, "
-                "renewals are final, and Lifetime is a final sale - "
-                "no refunds. Monthly also starts "
-                "with a 3-day free trial, so you can try everything "
-                "before ever being charged.")
+        return ("No - all sales are final once a payment has "
+                "been charged, on every plan, and renewals are "
+                "final too. Monthly starts with a 3-day free "
+                "trial, so you can try everything before ever "
+                "being charged. If you think a charge is wrong, "
+                f"email {SUPPORT_EMAIL} and it will be looked at.")
     if has("promo", "promotion", "discount", "coupon") or phrase(
             "promo code", "discount code", "on sale"):
         # Promo answers quote a live promo ONLY from Stripe state -
@@ -7112,11 +7097,9 @@ def _scripted_answer(q: str) -> str | None:
         return ("Yes, you can cancel anytime from your billing link. "
                 "Cancelling stops future charges, and your access runs "
                 "to the end of the period you have paid for, or to the "
-                "end of your trial. A first purchase of Monthly, "
-                "Quarterly or Yearly is refundable "
-                "within 3 days (one refund per person, ever); "
-                "renewals are final after that window, and Lifetime "
-                "is a final sale.")
+                "end of your trial. Once a payment has been charged, "
+                "all sales are final - there are no refunds on any "
+                "plan.")
     if has("upgrade", "downgrade") or (
             has("change", "switch") and has("plan", "plans")):
         return ("Yes. Upgrading charges only the difference and takes "
