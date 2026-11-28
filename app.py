@@ -5690,6 +5690,8 @@ def _exit_form(code, note=""):
         "genuinely help me make this better. At the end there is "
         "a one-time offer, in case it changes your mind.</p>"
         f"{note}"
+        '<div style="text-align:left;max-width:520px;'
+        'margin:0 auto">'
         f'<form method="post" action="/exit/{code}/feedback">'
         "<p><b>1. What is the main reason you are cancelling?"
         "</b></p>"
@@ -5713,8 +5715,11 @@ def _exit_form(code, note=""):
         'solid #3a4542;background:#111;color:#fff;width:320px;'
         'max-width:84vw"></textarea></p>'
         '<p><button class="btn" type="submit" '
-        'style="border:0;cursor:pointer">CONTINUE</button></p>'
-        "</form>"
+        'style="border:0;cursor:pointer;background:#16a34a;'
+        'color:#fff;font-weight:bold;letter-spacing:1px;'
+        'padding:14px 30px;border-radius:999px;font-size:16px">'
+        "CONTINUE</button></p>"
+        "</form></div>"
         f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>')
     return ACCESS_PAGE.replace("__BODY__", body)
 
@@ -5738,8 +5743,10 @@ def _exit_offer_screen(email, d):
         f"{text}"
         f'<form method="post" action="/exit/{code}/accept">'
         '<p><button class="btn" type="submit" '
-        'style="border:0;cursor:pointer">ACCEPT - STAY AND SAVE '
-        "50%</button></p></form>"
+        'style="border:0;cursor:pointer;background:#16a34a;'
+        'color:#fff;font-weight:bold;letter-spacing:1px;'
+        'padding:14px 30px;border-radius:999px;font-size:16px">'
+        "ACCEPT - STAY AND SAVE 50%</button></p></form>"
         f'<form method="post" action="/exit/{code}/decline">'
         '<p><button type="submit" style="background:none;'
         "border:0;color:#7d8a87;cursor:pointer;font-size:14px;"
