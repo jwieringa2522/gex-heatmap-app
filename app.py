@@ -5701,6 +5701,20 @@ def _exit_form(code, note=""):
         "<p><b>1. What is the main reason you are cancelling?"
         "</b></p>"
         f"{radios('q1', EXIT_REASONS)}"
+        '<div id="q1other" style="display:none;margin-left:18px">'
+        "<p><b>Tell me more:</b></p>"
+        '<p><textarea name="q1_other" rows="3" '
+        'placeholder="Type it here (optional)" '
+        'style="padding:12px 16px;border-radius:8px;'
+        "border:1px solid #3a4542;background:#111;color:#fff;"
+        'width:320px;max-width:84vw"></textarea></p>'
+        "</div>"
+        "<script>document.querySelectorAll('input[name=q1]')"
+        ".forEach(function(r){r.addEventListener('change',"
+        "function(){var c=document.querySelector("
+        "'input[name=q1]:checked');document.getElementById("
+        "'q1other').style.display=(c&&c.value==='Other')"
+        "?'block':'none';});});</script>"
         "<p><b>2. What did you like most?</b></p>"
         f"{radios('q2', EXIT_LIKED)}"
         "<p><b>3. Did you get fully set up - Telegram joined, "
@@ -5827,6 +5841,7 @@ async def exit_feedback_submit(code: str, request: Request):
     from urllib.parse import parse_qs
     form = parse_qs((await request.body()).decode("utf-8", "replace"))
     q1 = (form.get("q1", [""])[0] or "").strip()
+    q1_other = (form.get("q1_other", [""])[0] or "").strip()[:300]
     q2 = (form.get("q2", [""])[0] or "").strip()
     q3 = (form.get("q3", [""])[0] or "").strip()
     q3b = (form.get("q3b", [""])[0] or "").strip()
@@ -5850,6 +5865,8 @@ async def exit_feedback_submit(code: str, request: Request):
                     "can finish this with you.</p>")
             return HTMLResponse(
                 _exit_form(_ref_code(email), note))
+        if q1 == "Other" and q1_other:
+            q1 = f"Other - {q1_other}"
         if q3 == "I tried but something did not work":
             if q3b not in EXIT_SETUP_ISSUES:
                 note = ("<p>Please tap what went wrong in "
