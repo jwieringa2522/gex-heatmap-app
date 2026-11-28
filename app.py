@@ -5654,9 +5654,11 @@ EXIT_LIKED = ("The daily Gamma Brief and SPY levels",
               "The GEX heatmap", "The TradingView indicators",
               "The Telegram trade alerts", "The whale alerts",
               "Nothing stood out")
-EXIT_REASONS = ("Price", "Not enough trades for my style",
-                "I never got fully set up", "I did not use it enough",
-                "My trading is on pause right now", "Other")
+EXIT_REASONS = ("Too expensive", "I did not use it enough",
+                "Not enough trades for my style",
+                "It is missing something I need",
+                "I found something else I like better",
+                "Taking a break from trading", "Other")
 EXIT_SETUP = ("Yes, everything", "Partly set up",
               "No, I never finished",
               "I tried but something did not work")
@@ -5684,10 +5686,11 @@ def _exit_form(code, note=""):
         "a one-time offer, in case it changes your mind.</p>"
         f"{note}"
         f'<form method="post" action="/exit/{code}/feedback">'
-        "<p><b>1. What was most valuable to you?</b></p>"
-        f"{radios('q1', EXIT_LIKED)}"
-        "<p><b>2. What is the main reason you are leaving?</b></p>"
-        f"{radios('q2', EXIT_REASONS)}"
+        "<p><b>1. What is the main reason you are cancelling?"
+        "</b></p>"
+        f"{radios('q1', EXIT_REASONS)}"
+        "<p><b>2. What did you like most?</b></p>"
+        f"{radios('q2', EXIT_LIKED)}"
         "<p><b>3. Did you get fully set up - Telegram joined, "
         "indicators added, heatmap tried?</b></p>"
         f"{radios('q3', EXIT_SETUP)}"
@@ -5808,7 +5811,7 @@ async def exit_feedback_submit(code: str, request: Request):
         problem = _save_problem(d, email)
         if problem:
             return HTMLResponse(_exit_blocked_page(problem))
-        if q1 not in EXIT_LIKED or q2 not in EXIT_REASONS \
+        if q1 not in EXIT_REASONS or q2 not in EXIT_LIKED \
                 or q3 not in EXIT_SETUP or q4 not in EXIT_USAGE \
                 or q5 not in EXIT_BACK:
             note = ("<p>Please answer all five questions so I "
@@ -5824,7 +5827,7 @@ async def exit_feedback_submit(code: str, request: Request):
              q4, q5, "exit", comment or None))
         con.execute(
             "UPDATE site_subs SET cancel_reason=? WHERE email=?",
-            (q2, email))
+            (q1, email))
         con.commit()
         card = _stripe_card_fingerprint(d["stripe_customer_id"])
         used = _identity_save_used(con, email, tv=d["tv_username"],
@@ -5834,7 +5837,7 @@ async def exit_feedback_submit(code: str, request: Request):
     if sub_id:
         try:
             _stripe_post(f"subscriptions/{sub_id}",
-                         {"metadata[sbyb_cancel_reason]": q2})
+                         {"metadata[sbyb_cancel_reason]": q1})
         except Exception as e:
             print(f"[exit] cancel-reason stamp failed for "
                   f"{email}: {e}", flush=True)
