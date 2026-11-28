@@ -951,6 +951,9 @@ def _subs_db():
     if "comment" not in cf_cols:
         con.execute(
             "ALTER TABLE cancel_feedback ADD COLUMN comment TEXT")
+    if "q6" not in cf_cols:
+        con.execute(
+            "ALTER TABLE cancel_feedback ADD COLUMN q6 TEXT")
     # Win-back offers (Nov 14 2026): one row per win-back email
     # sent. The durable never-twice guard is the sbyb_winback_sent_ts
     # stamp on the Stripe customer; this log is reporting only.
@@ -5314,14 +5317,14 @@ def stripe_cancel_feedback(key: str = "", since_id: int = 0):
     try:
         rows = con.execute(
             "SELECT id, ts, email, sub_id, plan, q1, q2, q3, q4, "
-            "q5, source, comment FROM cancel_feedback "
+            "q5, source, comment, q6 FROM cancel_feedback "
             "WHERE id>? ORDER BY id",
             (since_id,)).fetchall()
     finally:
         con.close()
     return {"feedback": [
         dict(zip(("id", "ts", "email", "sub_id", "plan", "q1", "q2",
-                  "q3", "q4", "q5", "source", "comment"),
+                  "q3", "q4", "q5", "source", "comment", "q6"),
                  r)) for r in rows]}
 
 
@@ -5669,6 +5672,8 @@ EXIT_BACK = ("A lower price", "More day trade alerts",
              "Help getting set up properly",
              "Better results from the alerts",
              "Nothing - I am done trading for now")
+EXIT_PLATFORM = ("Telegram, like it is now", "Discord",
+                 "X subscription chat", "Patreon", "No preference")
 
 
 def _exit_form(code, note=""):
@@ -5678,7 +5683,7 @@ def _exit_form(code, note=""):
             f'value="{o}" required> {o}</label></p>'
             for o in options)
     body = (
-        '<div class="big">Before you go - five quick questions'
+        '<div class="big">Before you go - a few quick questions'
         "</div>"
         "<p>Your cancellation is not final until you finish this "
         "page. The questions take under a minute, and your answers "
@@ -5698,6 +5703,9 @@ def _exit_form(code, note=""):
         f"{radios('q4', EXIT_USAGE)}"
         "<p><b>5. What would bring you back?</b></p>"
         f"{radios('q5', EXIT_BACK)}"
+        "<p><b>6. Where would you prefer everything to live?"
+        "</b></p>"
+        f"{radios('q6', EXIT_PLATFORM)}"
         "<p>Anything else you want to tell me? (optional - "
         "only if you want to comment)</p>"
         '<p><textarea name="comment" rows="3" '
@@ -5801,6 +5809,7 @@ async def exit_feedback_submit(code: str, request: Request):
     q3 = (form.get("q3", [""])[0] or "").strip()
     q4 = (form.get("q4", [""])[0] or "").strip()
     q5 = (form.get("q5", [""])[0] or "").strip()
+    q6 = (form.get("q6", [""])[0] or "").strip()
     comment = (form.get("comment", [""])[0] or "").strip()[:1000]
     con = _subs_db()
     try:
@@ -5813,18 +5822,18 @@ async def exit_feedback_submit(code: str, request: Request):
             return HTMLResponse(_exit_blocked_page(problem))
         if q1 not in EXIT_REASONS or q2 not in EXIT_LIKED \
                 or q3 not in EXIT_SETUP or q4 not in EXIT_USAGE \
-                or q5 not in EXIT_BACK:
-            note = ("<p>Please answer all five questions so I "
+                or q5 not in EXIT_BACK or q6 not in EXIT_PLATFORM:
+            note = ("<p>Please answer all the questions so I "
                     "can finish this with you.</p>")
             return HTMLResponse(
                 _exit_form(_ref_code(email), note))
         sub_id = d["stripe_subscription_id"]
         con.execute(
             "INSERT INTO cancel_feedback(ts, email, sub_id, plan, "
-            "q1, q2, q3, q4, q5, source, comment) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "q1, q2, q3, q4, q5, source, comment, q6) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (time.time(), email, sub_id, d["plan"], q1, q2, q3,
-             q4, q5, "exit", comment or None))
+             q4, q5, "exit", comment or None, q6))
         con.execute(
             "UPDATE site_subs SET cancel_reason=? WHERE email=?",
             (q1, email))
