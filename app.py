@@ -1465,8 +1465,9 @@ ACCESS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <style>
 body{background:#000;color:#fff;font-family:Arial,sans-serif;text-align:center;
 padding:64px 24px;margin:0}
-h1{font-stretch:condensed;letter-spacing:2px;font-size:34px;margin:0 0 6px}
-.tag{color:#5e8f86;letter-spacing:4px;font-size:12px;margin-bottom:36px}
+h1{font-stretch:condensed;letter-spacing:1px;font-size:25px;margin:0 0 6px;
+white-space:nowrap}
+.tag{color:#7ec8b4;letter-spacing:4px;font-size:12px;margin-bottom:36px}
 p{color:#cfd8d5;max-width:520px;margin:0 auto 28px;line-height:1.55}
 a.btn{display:inline-block;background:#5e8f86;color:#fff;text-decoration:none;
 padding:14px 30px;border-radius:999px;font-weight:bold;letter-spacing:1px}
