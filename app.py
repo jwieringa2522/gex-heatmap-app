@@ -5665,6 +5665,11 @@ EXIT_REASONS = ("Too expensive", "I did not use it enough",
 EXIT_SETUP = ("Yes, everything", "Partly set up",
               "No, I never finished",
               "I tried but something did not work")
+EXIT_SETUP_ISSUES = ("Joining the Telegram channel",
+                     "Adding the TradingView indicators",
+                     "The GEX heatmap",
+                     "A link or invite did not work",
+                     "Something else")
 EXIT_USAGE = ("Almost every day", "A few times a week",
               "Once or twice total", "Never got around to it")
 EXIT_BACK = ("A lower price", "More day trade alerts",
@@ -5677,18 +5682,18 @@ EXIT_PLATFORM = ("Telegram, like it is now", "Discord",
 
 
 def _exit_form(code, note=""):
-    def radios(name, options):
+    def radios(name, options, required=True):
+        req = " required" if required else ""
         return "".join(
             f'<p><label><input type="radio" name="{name}" '
-            f'value="{o}" required> {o}</label></p>'
+            f'value="{o}"{req}> {o}</label></p>'
             for o in options)
     body = (
         '<div class="big">Before you go - a few quick questions'
         "</div>"
         "<p>Your cancellation is not final until you finish this "
         "page. The questions take under a minute, and your answers "
-        "genuinely help me make this better. At the end there is "
-        "a one-time offer, in case it changes your mind.</p>"
+        "genuinely help me make this better.</p>"
         f"{note}"
         '<div style="text-align:left;max-width:520px;'
         'margin:0 auto">'
@@ -5701,6 +5706,16 @@ def _exit_form(code, note=""):
         "<p><b>3. Did you get fully set up - Telegram joined, "
         "indicators added, heatmap tried?</b></p>"
         f"{radios('q3', EXIT_SETUP)}"
+        '<div id="q3sub" style="display:none;margin-left:18px">'
+        "<p><b>What went wrong?</b></p>"
+        f"{radios('q3b', EXIT_SETUP_ISSUES, required=False)}"
+        "</div>"
+        "<script>document.querySelectorAll('input[name=q3]')"
+        ".forEach(function(r){r.addEventListener('change',"
+        "function(){var c=document.querySelector("
+        "'input[name=q3]:checked');document.getElementById("
+        "'q3sub').style.display=(c&&c.value==='I tried but "
+        "something did not work')?'block':'none';});});</script>"
         "<p><b>4. How often did you actually use it?</b></p>"
         f"{radios('q4', EXIT_USAGE)}"
         "<p><b>5. What would bring you back?</b></p>"
@@ -5814,6 +5829,7 @@ async def exit_feedback_submit(code: str, request: Request):
     q1 = (form.get("q1", [""])[0] or "").strip()
     q2 = (form.get("q2", [""])[0] or "").strip()
     q3 = (form.get("q3", [""])[0] or "").strip()
+    q3b = (form.get("q3b", [""])[0] or "").strip()
     q4 = (form.get("q4", [""])[0] or "").strip()
     q5 = (form.get("q5", [""])[0] or "").strip()
     q6 = (form.get("q6", [""])[0] or "").strip()
@@ -5834,6 +5850,14 @@ async def exit_feedback_submit(code: str, request: Request):
                     "can finish this with you.</p>")
             return HTMLResponse(
                 _exit_form(_ref_code(email), note))
+        if q3 == "I tried but something did not work":
+            if q3b not in EXIT_SETUP_ISSUES:
+                note = ("<p>Please tap what went wrong in "
+                        "question 3 so I can finish this with "
+                        "you.</p>")
+                return HTMLResponse(
+                    _exit_form(_ref_code(email), note))
+            q3 = f"{q3} - {q3b}"
         sub_id = d["stripe_subscription_id"]
         con.execute(
             "INSERT INTO cancel_feedback(ts, email, sub_id, plan, "
