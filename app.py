@@ -948,6 +948,9 @@ def _subs_db():
     if "source" not in cf_cols:
         con.execute(
             "ALTER TABLE cancel_feedback ADD COLUMN source TEXT")
+    if "comment" not in cf_cols:
+        con.execute(
+            "ALTER TABLE cancel_feedback ADD COLUMN comment TEXT")
     # Win-back offers (Nov 14 2026): one row per win-back email
     # sent. The durable never-twice guard is the sbyb_winback_sent_ts
     # stamp on the Stripe customer; this log is reporting only.
@@ -5311,13 +5314,15 @@ def stripe_cancel_feedback(key: str = "", since_id: int = 0):
     try:
         rows = con.execute(
             "SELECT id, ts, email, sub_id, plan, q1, q2, q3, q4, "
-            "q5, source FROM cancel_feedback WHERE id>? ORDER BY id",
+            "q5, source, comment FROM cancel_feedback "
+            "WHERE id>? ORDER BY id",
             (since_id,)).fetchall()
     finally:
         con.close()
     return {"feedback": [
         dict(zip(("id", "ts", "email", "sub_id", "plan", "q1", "q2",
-                  "q3", "q4", "q5", "source"), r)) for r in rows]}
+                  "q3", "q4", "q5", "source", "comment"),
+                 r)) for r in rows]}
 
 
 def _email_for_code(con, code):
@@ -5648,16 +5653,20 @@ async def cancel_feedback_submit(code: str, request: Request):
 EXIT_LIKED = ("The daily Gamma Brief and SPY levels",
               "The GEX heatmap", "The TradingView indicators",
               "The Telegram trade alerts", "The whale alerts",
-              "I did not get a chance to use it")
-EXIT_REASONS = ("Too expensive", "Not enough day trades or alerts",
-                "Technical issues", "Not using it enough",
-                "Does not fit my trading style",
-                "Just wanted to try it out", "Other")
-EXIT_PRICE = ("Fair price", "A little high", "Way too high",
-              "Did not use it enough to judge")
-EXIT_ALERTS = ("Yes, plenty", "Not enough day trades",
-               "Not enough swing trades",
-               "I do not follow the alerts")
+              "Nothing stood out")
+EXIT_REASONS = ("Price", "Not enough trades for my style",
+                "I never got fully set up", "I did not use it enough",
+                "My trading is on pause right now", "Other")
+EXIT_SETUP = ("Yes, everything", "Partly set up",
+              "No, I never finished",
+              "I tried but something did not work")
+EXIT_USAGE = ("Almost every day", "A few times a week",
+              "Once or twice total", "Never got around to it")
+EXIT_BACK = ("A lower price", "More day trade alerts",
+             "More swing trade alerts",
+             "Help getting set up properly",
+             "Better results from the alerts",
+             "Nothing - I am done trading for now")
 
 
 def _exit_form(code, note=""):
@@ -5675,21 +5684,23 @@ def _exit_form(code, note=""):
         "a one-time offer, in case it changes your mind.</p>"
         f"{note}"
         f'<form method="post" action="/exit/{code}/feedback">'
-        "<p><b>1. What did you like most?</b></p>"
+        "<p><b>1. What was most valuable to you?</b></p>"
         f"{radios('q1', EXIT_LIKED)}"
         "<p><b>2. What is the main reason you are leaving?</b></p>"
         f"{radios('q2', EXIT_REASONS)}"
-        "<p><b>3. Did you run into any technical issues?</b></p>"
-        f"{radios('q3', ('Yes', 'No'))}"
-        "<p>If yes, what happened? (optional)</p>"
-        '<p><textarea name="q3d" rows="3" '
+        "<p><b>3. Did you get fully set up - Telegram joined, "
+        "indicators added, heatmap tried?</b></p>"
+        f"{radios('q3', EXIT_SETUP)}"
+        "<p><b>4. How often did you actually use it?</b></p>"
+        f"{radios('q4', EXIT_USAGE)}"
+        "<p><b>5. What would bring you back?</b></p>"
+        f"{radios('q5', EXIT_BACK)}"
+        "<p>Anything else you want to tell me? (optional - "
+        "only if you want to comment)</p>"
+        '<p><textarea name="comment" rows="3" '
         'style="padding:12px 16px;border-radius:8px;border:1px '
         'solid #3a4542;background:#111;color:#fff;width:320px;'
         'max-width:84vw"></textarea></p>'
-        "<p><b>4. How did the price feel for what you got?</b></p>"
-        f"{radios('q4', EXIT_PRICE)}"
-        "<p><b>5. Were there enough trade alerts for you?</b></p>"
-        f"{radios('q5', EXIT_ALERTS)}"
         '<p><button class="btn" type="submit" '
         'style="border:0;cursor:pointer">CONTINUE</button></p>'
         "</form>"
@@ -5785,9 +5796,9 @@ async def exit_feedback_submit(code: str, request: Request):
     q1 = (form.get("q1", [""])[0] or "").strip()
     q2 = (form.get("q2", [""])[0] or "").strip()
     q3 = (form.get("q3", [""])[0] or "").strip()
-    q3d = (form.get("q3d", [""])[0] or "").strip()[:500]
     q4 = (form.get("q4", [""])[0] or "").strip()
     q5 = (form.get("q5", [""])[0] or "").strip()
+    comment = (form.get("comment", [""])[0] or "").strip()[:1000]
     con = _subs_db()
     try:
         email = _email_for_code(con, code)
@@ -5798,21 +5809,19 @@ async def exit_feedback_submit(code: str, request: Request):
         if problem:
             return HTMLResponse(_exit_blocked_page(problem))
         if q1 not in EXIT_LIKED or q2 not in EXIT_REASONS \
-                or q3 not in ("Yes", "No") or q4 not in EXIT_PRICE \
-                or q5 not in EXIT_ALERTS:
+                or q3 not in EXIT_SETUP or q4 not in EXIT_USAGE \
+                or q5 not in EXIT_BACK:
             note = ("<p>Please answer all five questions so I "
                     "can finish this with you.</p>")
             return HTMLResponse(
                 _exit_form(_ref_code(email), note))
-        if q3 == "Yes" and q3d:
-            q3 = f"Yes - {q3d}"
         sub_id = d["stripe_subscription_id"]
         con.execute(
             "INSERT INTO cancel_feedback(ts, email, sub_id, plan, "
-            "q1, q2, q3, q4, q5, source) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "q1, q2, q3, q4, q5, source, comment) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (time.time(), email, sub_id, d["plan"], q1, q2, q3,
-             q4, q5, "exit"))
+             q4, q5, "exit", comment or None))
         con.execute(
             "UPDATE site_subs SET cancel_reason=? WHERE email=?",
             (q2, email))
