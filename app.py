@@ -934,6 +934,20 @@ def _subs_db():
     con.execute("""CREATE TABLE IF NOT EXISTS cancel_feedback(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, email TEXT,
         sub_id TEXT, plan TEXT, q1 TEXT, q2 TEXT, q3 TEXT)""")
+    # Exit-survey flow (Nov 28 2026): the email-cancel survey has
+    # five questions and a source marker, so it needs three more
+    # columns than the original 3-question site form.
+    cf_cols = {r[1] for r in con.execute(
+        "PRAGMA table_info(cancel_feedback)")}
+    if "q4" not in cf_cols:
+        con.execute(
+            "ALTER TABLE cancel_feedback ADD COLUMN q4 TEXT")
+    if "q5" not in cf_cols:
+        con.execute(
+            "ALTER TABLE cancel_feedback ADD COLUMN q5 TEXT")
+    if "source" not in cf_cols:
+        con.execute(
+            "ALTER TABLE cancel_feedback ADD COLUMN source TEXT")
     # Win-back offers (Nov 14 2026): one row per win-back email
     # sent. The durable never-twice guard is the sbyb_winback_sent_ts
     # stamp on the Stripe customer; this log is reporting only.
@@ -5296,14 +5310,14 @@ def stripe_cancel_feedback(key: str = "", since_id: int = 0):
     con = _subs_db()
     try:
         rows = con.execute(
-            "SELECT id, ts, email, sub_id, plan, q1, q2, q3 "
-            "FROM cancel_feedback WHERE id>? ORDER BY id",
+            "SELECT id, ts, email, sub_id, plan, q1, q2, q3, q4, "
+            "q5, source FROM cancel_feedback WHERE id>? ORDER BY id",
             (since_id,)).fetchall()
     finally:
         con.close()
     return {"feedback": [
         dict(zip(("id", "ts", "email", "sub_id", "plan", "q1", "q2",
-                  "q3"), r)) for r in rows]}
+                  "q3", "q4", "q5", "source"), r)) for r in rows]}
 
 
 def _email_for_code(con, code):
@@ -5543,6 +5557,25 @@ def cancel_page(code: str):
     return HTMLResponse(_feedback_form(_ref_code(email)))
 
 
+def _cancel_at_period_end(sub_id, email):
+    """Set cancel_at_period_end on a subscription. Returns
+    (ok, period_end_ts); (False, None) on any failure."""
+    if not sub_id:
+        return False, None
+    try:
+        sub = _stripe_post(
+            f"subscriptions/{sub_id}",
+            {"cancel_at_period_end": "true"})
+        items = (sub.get("items") or {}).get("data") or []
+        period_end = sub.get("current_period_end") or (
+            items[0].get("current_period_end") if items else None)
+        return bool(sub.get("cancel_at_period_end")), period_end
+    except Exception as e:
+        print(f"[save] period-end cancel failed for {email} "
+              f"({sub_id}): {e}", flush=True)
+        return False, None
+
+
 @app.post("/cancel/{code}/feedback", response_class=HTMLResponse)
 async def cancel_feedback_submit(code: str, request: Request):
     from urllib.parse import parse_qs
@@ -5582,20 +5615,7 @@ async def cancel_feedback_submit(code: str, request: Request):
         except Exception as e:
             print(f"[save] cancel-reason stamp failed for "
                   f"{email}: {e}", flush=True)
-    period_end = None
-    cancel_ok = False
-    if sub_id:
-        try:
-            sub = _stripe_post(
-                f"subscriptions/{sub_id}",
-                {"cancel_at_period_end": "true"})
-            items = (sub.get("items") or {}).get("data") or []
-            period_end = sub.get("current_period_end") or (
-                items[0].get("current_period_end") if items else None)
-            cancel_ok = bool(sub.get("cancel_at_period_end"))
-        except Exception as e:
-            print(f"[save] feedback cancel failed for {email} "
-                  f"({sub_id}): {e}", flush=True)
+    cancel_ok, period_end = _cancel_at_period_end(sub_id, email)
     if cancel_ok:
         end = _fmt_day(period_end)
         until = f" until {end}" if end else ""
@@ -5615,6 +5635,263 @@ async def cancel_feedback_submit(code: str, request: Request):
                 f"<p>Please email {SUPPORT_EMAIL} and I will cancel "
                 "it for you right away - mention that the website "
                 "cancel did not go through.</p>")
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+# Exit-survey flow (Nov 28 2026, Justin's order): a member who
+# asks to cancel by email is NOT cancelled on the spot. The
+# support reply carries their personal /exit/<code> link; the
+# cancellation only completes after they answer five questions
+# and decline the one-time 50% stay offer shown at the END.
+# Answers land in cancel_feedback with source="exit" and ride
+# the same site_sync pull into support-inbox/cancel-feedback.md.
+EXIT_LIKED = ("The daily Gamma Brief and SPY levels",
+              "The GEX heatmap", "The TradingView indicators",
+              "The Telegram trade alerts", "The whale alerts",
+              "I did not get a chance to use it")
+EXIT_REASONS = ("Too expensive", "Not enough day trades or alerts",
+                "Technical issues", "Not using it enough",
+                "Does not fit my trading style",
+                "Just wanted to try it out", "Other")
+EXIT_PRICE = ("Fair price", "A little high", "Way too high",
+              "Did not use it enough to judge")
+EXIT_ALERTS = ("Yes, plenty", "Not enough day trades",
+               "Not enough swing trades",
+               "I do not follow the alerts")
+
+
+def _exit_form(code, note=""):
+    def radios(name, options):
+        return "".join(
+            f'<p><label><input type="radio" name="{name}" '
+            f'value="{o}" required> {o}</label></p>'
+            for o in options)
+    body = (
+        '<div class="big">Before you go - five quick questions'
+        "</div>"
+        "<p>Your cancellation is not final until you finish this "
+        "page. The questions take under a minute, and your answers "
+        "genuinely help me make this better. At the end there is "
+        "a one-time offer, in case it changes your mind.</p>"
+        f"{note}"
+        f'<form method="post" action="/exit/{code}/feedback">'
+        "<p><b>1. What did you like most?</b></p>"
+        f"{radios('q1', EXIT_LIKED)}"
+        "<p><b>2. What is the main reason you are leaving?</b></p>"
+        f"{radios('q2', EXIT_REASONS)}"
+        "<p><b>3. Did you run into any technical issues?</b></p>"
+        f"{radios('q3', ('Yes', 'No'))}"
+        "<p>If yes, what happened? (optional)</p>"
+        '<p><textarea name="q3d" rows="3" '
+        'style="padding:12px 16px;border-radius:8px;border:1px '
+        'solid #3a4542;background:#111;color:#fff;width:320px;'
+        'max-width:84vw"></textarea></p>'
+        "<p><b>4. How did the price feel for what you got?</b></p>"
+        f"{radios('q4', EXIT_PRICE)}"
+        "<p><b>5. Were there enough trade alerts for you?</b></p>"
+        f"{radios('q5', EXIT_ALERTS)}"
+        '<p><button class="btn" type="submit" '
+        'style="border:0;cursor:pointer">CONTINUE</button></p>'
+        "</form>"
+        f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>')
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+def _exit_offer_screen(email, d):
+    code = _ref_code(email)
+    if d["status"] == "trialing":
+        big = "One last thing - 50% off your first payment"
+        text = ("<p>Stay, and when your trial ends your first "
+                "payment is half price. Same plan, same access, "
+                "nothing else changes. This is a one-time offer - "
+                "accept it and the cancellation is off.</p>")
+    else:
+        big = "One last thing - 50% off your next payment"
+        text = ("<p>Stay, and 50% comes off your next payment "
+                "automatically. Same plan, same access, nothing "
+                "else changes. This is a one-time offer - accept "
+                "it and the cancellation is off.</p>")
+    body = (
+        f'<div class="big">{big}</div>'
+        f"{text}"
+        f'<form method="post" action="/exit/{code}/accept">'
+        '<p><button class="btn" type="submit" '
+        'style="border:0;cursor:pointer">ACCEPT - STAY AND SAVE '
+        "50%</button></p></form>"
+        f'<form method="post" action="/exit/{code}/decline">'
+        '<p><button type="submit" style="background:none;'
+        "border:0;color:#7d8a87;cursor:pointer;font-size:14px;"
+        'text-decoration:underline">No thanks - cancel my '
+        "subscription</button></p></form>"
+        f'<div class="small">Questions? Email {SUPPORT_EMAIL}</div>')
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+def _exit_confirm_screen(email):
+    """Shown after the survey when the save offer was already
+    used on this membership: no offer left, just the final
+    confirm step."""
+    code = _ref_code(email)
+    body = (
+        '<div class="big">One last step</div>'
+        "<p>You have already used the one-time 50% stay offer on "
+        "this membership, so there is no offer left to show. "
+        "Confirm below and the cancellation is finished.</p>"
+        f'<form method="post" action="/exit/{code}/decline">'
+        '<p><button class="btn" type="submit" '
+        'style="border:0;cursor:pointer">CANCEL MY SUBSCRIPTION'
+        "</button></p></form>"
+        f'<div class="small">Changed your mind? Email '
+        f"{SUPPORT_EMAIL} and I will sort it out.</div>")
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+def _exit_blocked_page(problem):
+    if problem == "lifetime has no renewal to discount":
+        body = ('<div class="big">Nothing to cancel here.</div>'
+                "<p>Your plan is Lifetime - a one-time payment. "
+                "There is no renewal and nothing to cancel.</p>"
+                f'<div class="small">Questions? Email '
+                f"{SUPPORT_EMAIL}</div>")
+    else:
+        body = ('<div class="big">This subscription is no longer '
+                "active.</div><p>There is nothing to cancel or "
+                "change here.</p>"
+                f'<div class="small">Questions? Email '
+                f"{SUPPORT_EMAIL}</div>")
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+@app.get("/exit/{code}", response_class=HTMLResponse)
+def exit_page(code: str):
+    con = _subs_db()
+    try:
+        email = _email_for_code(con, code)
+        if not email:
+            return HTMLResponse(_bad_link_page())
+        d = _save_row(con, email)
+        problem = _save_problem(d, email)
+        if problem:
+            return HTMLResponse(_exit_blocked_page(problem))
+        return HTMLResponse(_exit_form(_ref_code(email)))
+    finally:
+        con.close()
+
+
+@app.post("/exit/{code}/feedback", response_class=HTMLResponse)
+async def exit_feedback_submit(code: str, request: Request):
+    from urllib.parse import parse_qs
+    form = parse_qs((await request.body()).decode("utf-8", "replace"))
+    q1 = (form.get("q1", [""])[0] or "").strip()
+    q2 = (form.get("q2", [""])[0] or "").strip()
+    q3 = (form.get("q3", [""])[0] or "").strip()
+    q3d = (form.get("q3d", [""])[0] or "").strip()[:500]
+    q4 = (form.get("q4", [""])[0] or "").strip()
+    q5 = (form.get("q5", [""])[0] or "").strip()
+    con = _subs_db()
+    try:
+        email = _email_for_code(con, code)
+        if not email:
+            return HTMLResponse(_bad_link_page())
+        d = _save_row(con, email)
+        problem = _save_problem(d, email)
+        if problem:
+            return HTMLResponse(_exit_blocked_page(problem))
+        if q1 not in EXIT_LIKED or q2 not in EXIT_REASONS \
+                or q3 not in ("Yes", "No") or q4 not in EXIT_PRICE \
+                or q5 not in EXIT_ALERTS:
+            note = ("<p>Please answer all five questions so I "
+                    "can finish this with you.</p>")
+            return HTMLResponse(
+                _exit_form(_ref_code(email), note))
+        if q3 == "Yes" and q3d:
+            q3 = f"Yes - {q3d}"
+        sub_id = d["stripe_subscription_id"]
+        con.execute(
+            "INSERT INTO cancel_feedback(ts, email, sub_id, plan, "
+            "q1, q2, q3, q4, q5, source) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (time.time(), email, sub_id, d["plan"], q1, q2, q3,
+             q4, q5, "exit"))
+        con.execute(
+            "UPDATE site_subs SET cancel_reason=? WHERE email=?",
+            (q2, email))
+        con.commit()
+        card = _stripe_card_fingerprint(d["stripe_customer_id"])
+        used = _identity_save_used(con, email, tv=d["tv_username"],
+                                   card=card)
+    finally:
+        con.close()
+    if sub_id:
+        try:
+            _stripe_post(f"subscriptions/{sub_id}",
+                         {"metadata[sbyb_cancel_reason]": q2})
+        except Exception as e:
+            print(f"[exit] cancel-reason stamp failed for "
+                  f"{email}: {e}", flush=True)
+    if used:
+        return HTMLResponse(_exit_confirm_screen(email))
+    return HTMLResponse(_exit_offer_screen(email, d))
+
+
+@app.post("/exit/{code}/accept", response_class=HTMLResponse)
+def exit_accept(code: str):
+    con = _subs_db()
+    try:
+        email = _email_for_code(con, code)
+        if not email:
+            return HTMLResponse(_bad_link_page())
+        result = _save_redeem(con, email)
+    finally:
+        con.close()
+    if result.get("ok"):
+        body = ('<div class="big">You\'re staying - 50% off is '
+                "applied.</div>"
+                "<p>The discount is on your subscription now and "
+                "comes off your next payment automatically. No "
+                "cancellation is in place.</p>"
+                f'<div class="small">Questions? Email {SUPPORT_EMAIL}'
+                "</div>")
+    else:
+        body = ('<div class="big">That offer is not available '
+                "here.</div><p>It may already have been used on "
+                "this membership, or the subscription is no longer "
+                "active. Nothing was changed.</p>"
+                f'<div class="small">Questions? Email {SUPPORT_EMAIL}'
+                "</div>")
+    return ACCESS_PAGE.replace("__BODY__", body)
+
+
+@app.post("/exit/{code}/decline", response_class=HTMLResponse)
+def exit_decline(code: str):
+    con = _subs_db()
+    try:
+        email = _email_for_code(con, code)
+        if not email:
+            return HTMLResponse(_bad_link_page())
+        d = _save_row(con, email)
+    finally:
+        con.close()
+    sub_id = d["stripe_subscription_id"] if d else None
+    cancel_ok, period_end = _cancel_at_period_end(sub_id, email)
+    if cancel_ok:
+        end = _fmt_day(period_end)
+        until = f" until {end}" if end else ""
+        body = ('<div class="big">Your subscription is '
+                "cancelled.</div>"
+                f"<p>You keep full access{until}, and you will "
+                "not be charged again. Your Telegram and "
+                "TradingView access ends when the period ends.</p>"
+                "<p>Thanks for the answers - they genuinely help "
+                "me make this better.</p>"
+                f'<div class="small">Changed your mind before '
+                f"then? Email {SUPPORT_EMAIL} and I will sort it "
+                "out.</div>")
+    else:
+        body = ('<div class="big">The cancel did not finish.</div>'
+                f"<p>Please email {SUPPORT_EMAIL} and I will "
+                "cancel it for you right away - mention that the "
+                "website cancel did not go through.</p>")
     return ACCESS_PAGE.replace("__BODY__", body)
 
 
